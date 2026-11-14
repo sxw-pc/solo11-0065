@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}审计台账 · 分流验台{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Local experiment evidence</p>
+    <h1>把一次分流审计<br>变成可复核的决策</h1>
+    <p class="hero-copy">
+      离线读取实验定义、分配与观测 fixture，检查比例、重复曝光、互斥冲突、
+      主指标、护栏与分层反转，并按声明式规则生成决策卡。
+    </p>
+  </div>
+  <div class="hero-aside">
+    <div class="mono-label">运行演示</div>
+    <code>python -m app demo --out out --db data/ledger.sqlite3</code>
+    <div class="mono-label">启动本地服务</div>
+    <code>python -m app serve --port 5000</code>
+  </div>
+</section>
+
+<section class="stat-strip" aria-label="台账概览">
+  <div class="stat">
+    <span>累计运行</span>
+    <strong>{{ total }}</strong>
+    <small>SQLite 台账记录</small>
+  </div>
+  <div class="stat decision-ship">
+    <span>可上线</span>
+    <strong>{{ counts.ship }}</strong>
+    <small>证据齐全</small>
+  </div>
+  <div class="stat decision-iterate">
+    <span>继续迭代</span>
+    <strong>{{ counts.iterate }}</strong>
+    <small>需要补证据或解释异质性</small>
+  </div>
+  <div class="stat decision-stop">
+    <span>停止</span>
+    <strong>{{ counts.stop }}</strong>
+    <small>负向或护栏越界</small>
+  </div>
+  <div class="stat decision-review">
+    <span>人工复核</span>
+    <strong>{{ counts.review }}</strong>
+    <small>数据质量或冲突</small>
+  </div>
+</section>
+
+<div class="section-head">
+  <div>
+    <h2>审计记录</h2>
+    <p class="muted">按生成时间倒序。点击一行查看决策卡、指标、分层与原始产物。</p>
+  </div>
+  <div class="filter-row" aria-label="按决策筛选">
+    <a class="chip {{ 'active' if not selected else '' }}" href="{{ url_for('index') }}">全部</a>
+    {% for key, label in DECISION_LABELS.items() %}
+    <a class="chip {{ 'active' if selected == key else '' }}"
+       href="{{ url_for('index', decision=key) }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+{% if runs %}
+<div class="table-wrap">
+  <table class="runs-table">
+    <thead>
+      <tr>
+        <th>实验 / run</th>
+        <th>决策</th>
+        <th class="num">主指标效应</th>
+        <th class="num">p 值</th>
+        <th class="num">Finding</th>
+        <th>生成时间</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in runs %}
+      <tr>
+        <td>
+          <a class="run-name" href="{{ url_for('run_detail', run_id=row.run_id) }}">{{ row.experiment_name }}</a>
+          <div class="mono-sub">{{ row.run_id }}</div>
+        </td>
+        <td><span class="decision-pill {{ row.decision }}">{{ DECISION_LABELS.get(row.decision, row.decision) }}</span></td>
+        <td class="num">{{ "%+.4f"|format(row.primary_effect) }}</td>
+        <td class="num">{{ row.primary_p_value|pval }}</td>
+        <td class="num">{{ row.finding_count }}</td>
+        <td class="time">{{ row.generated_at.replace("T", " ")[:19] }}</td>
+        <td class="row-actions">
+          <a href="{{ url_for('run_detail', run_id=row.run_id) }}">详情</a>
+          <a href="{{ url_for('artifact', run_id=row.run_id, name='report.html') }}">HTML</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">
+  <div class="empty-icon" aria-hidden="true">∅</div>
+  <h2>还没有审计记录</h2>
+  <p>在项目根目录运行演示命令，生成 fixture 的审计结果并写入本地台账。</p>
+  <pre>python -m app demo --out out --db data/ledger.sqlite3</pre>
+  <p class="muted">Web 端不会上传数据、不会发起网络请求，也不会执行实验上线。</p>
+</div>
+{% endif %}
+
+<section class="notes-grid">
+  <article>
+    <h3>输入边界</h3>
+    <p>仅接受仓库内的实验 YAML、分配 CSV 与观测 CSV。所有 fixture 为合成数据，unit_id 形如 <code>unit-0001</code>。</p>
+  </article>
+  <article>
+    <h3>决策证据</h3>
+    <p>分流比例、曝光重复、互斥冲突、主指标区间、护栏劣化与分层方向反转共同进入规则引擎。</p>
+  </article>
+  <article>
+    <h3>可复现</h3>
+    <p>统计只用标准库。除 run_id 与时间外，同一输入和配置生成相同报告内容。</p>
+  </article>
+</section>
+{% endblock %}

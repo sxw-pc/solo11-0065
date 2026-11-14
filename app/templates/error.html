@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} · 分流验台{% endblock %}
+{% block content %}
+<section class="empty-state">
+  <p class="eyebrow">Local request error</p>
+  <h1>{{ code }}</h1>
+  <p>{{ message }}</p>
+  <p class="muted">本服务只读取本地台账与 <code>out/</code> 中由本项目生成的产物。</p>
+  <a class="button" href="{{ url_for('index') }}">返回审计台账</a>
+</section>
+{% endblock %}

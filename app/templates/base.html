@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}分流验台{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <header class="site-head">
+      <a class="wordmark" href="{{ url_for('index') }}">
+        <span class="mark" aria-hidden="true">验</span>
+        <span>
+          <strong>分流验台</strong>
+          <small>Split Audit Bench</small>
+        </span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="{{ url_for('index') }}">审计台账</a>
+        <a href="{{ url_for('healthz') }}">健康检查</a>
+        <span class="local-pill">127.0.0.1 · 离线</span>
+      </nav>
+    </header>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="site-foot">
+      <span>分流验台 · 本地实验分流健康审计</span>
+      <span>只读展示 · 不连接外部服务 · 不执行上线</span>
+    </footer>
+  </div>
+</body>
+</html>

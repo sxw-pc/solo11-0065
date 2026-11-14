@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}{{ result.experiment.experiment.name }} · 分流验台{% endblock %}
+{% block content %}
+<nav class="breadcrumb"><a href="{{ url_for('index') }}">审计台账</a><span>/</span><span>{{ row.run_id }}</span></nav>
+
+<section class="run-head">
+  <div>
+    <p class="eyebrow">{{ result.experiment.experiment.id }} · {{ result.experiment.experiment.owner }}</p>
+    <h1>{{ result.experiment.experiment.name }}</h1>
+    <p class="hero-copy">{{ result.experiment.experiment.hypothesis }}</p>
+  </div>
+  <div class="artifact-links">
+    <a class="button" href="{{ url_for('artifact', run_id=row.run_id, name='report.html') }}">HTML 报告</a>
+    <a class="button ghost" href="{{ url_for('artifact', run_id=row.run_id, name='audit.json') }}">JSON</a>
+    <a class="button ghost" href="{{ url_for('artifact', run_id=row.run_id, name='decision_card.json') }}">决策卡</a>
+    <a class="button ghost" href="{{ url_for('artifact', run_id=row.run_id, name='report.md') }}">Markdown</a>
+  </div>
+</section>
+
+<section class="decision-panel {{ result.decision.card }}">
+  <div class="decision-main">
+    <p class="eyebrow">Decision card</p>
+    <h2>{{ result.decision.title }}</h2>
+    <p>{{ result.decision.action }}</p>
+  </div>
+  <dl class="decision-meta">
+    <div><dt>命中规则</dt><dd>{{ result.decision.matched_rule }}</dd></div>
+    <div><dt>规则理由</dt><dd>{{ result.decision.reason }}</dd></div>
+    <div><dt>输入摘要</dt><dd class="hash">{{ result.run.input_digest[:24] }}…</dd></div>
+    <div><dt>生成时间</dt><dd>{{ result.run.generated_at.replace("T", " ")[:19] }}</dd></div>
+  </dl>
+</section>
+
+<section class="stat-strip compact">
+  <div class="stat">
+    <span>主指标效应</span>
+    <strong>{{ "%+.4f"|format(result.metrics.primary.absolute_effect) }}</strong>
+    <small>p={{ result.metrics.primary.p_value|pval }}</small>
+  </div>
+  <div class="stat">
+    <span>95% 区间</span>
+    <strong class="range">{{ result.metrics.primary.ci_low|num(3) }} – {{ result.metrics.primary.ci_high|num(3) }}</strong>
+    <small>{{ "显著" if result.metrics.primary.significant else "不显著" }}</small>
+  </div>
+  <div class="stat">
+    <span>观测覆盖</span>
+    <strong>{{ result.counts.observation_coverage|pct(1) }}</strong>
+    <small>{{ result.counts.unique_observation_units }} 个唯一单元</small>
+  </div>
+  <div class="stat">
+    <span>Findings</span>
+    <strong>{{ result.findings|length }}</strong>
+    <small>critical {{ result.finding_counts.get("critical", 0) }} / high {{ result.finding_counts.get("high", 0) }}</small>
+  </div>
+</section>
+
+<div class="two-col">
+  <section>
+    <div class="section-head"><h2>指标与护栏</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>指标</th><th class="num">对照</th><th class="num">实验</th><th class="num">效应</th><th class="num">p</th><th>状态</th></tr></thead>
+        <tbody>
+          {% for metric in [result.metrics.primary] + result.metrics.secondary + result.metrics.guardrails %}
+          <tr>
+            <td><strong>{{ metric.label }}</strong><div class="mono-sub">{{ metric.role }} · {{ metric.key }}</div></td>
+            <td class="num">{{ metric.control_value|num(4) }}<div class="mono-sub">n={{ metric.control_n }}</div></td>
+            <td class="num">{{ metric.treatment_value|num(4) }}<div class="mono-sub">n={{ metric.treatment_n }}</div></td>
+            <td class="num">{{ "%+.4f"|format(metric.absolute_effect) }}</td>
+            <td class="num">{{ metric.p_value|pval }}</td>
+            <td>
+              {% if metric.role == "guardrail" %}
+              <span class="status {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
+              {% elif metric.significant %}
+              <span class="status {{ 'pass' if metric.favorable else 'fail' }}">{{ "显著" if metric.favorable else "负向" }}</span>
+              {% else %}<span class="status neutral">不显著</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <section>
+    <div class="section-head"><h2>自动检查</h2></div>
+    <div class="check-list">
+      {% for check in result.checks %}
+      <div class="check-row">
+        <div>
+          <strong>{{ check.label }}</strong>
+          <p>{{ check.summary }}</p>
+        </div>
+        <span class="status {{ check.status }}">{{ CHECK_LABELS.get(check.status, check.status) }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<section>
+  <div class="section-head">
+    <h2>Findings</h2>
+    <p class="muted">按严重度排序的结构化发现。</p>
+  </div>
+  {% if result.findings %}
+  <div class="finding-grid">
+    {% for finding in result.findings %}
+    <article class="finding-card">
+      <div class="finding-top">
+        <span class="status {{ finding.severity }}">{{ SEVERITY_LABELS.get(finding.severity, finding.severity) }}</span>
+        <span class="mono-sub">{{ finding.code }}</span>
+      </div>
+      <h3>{{ finding.title }}</h3>
+      <p>{{ finding.detail }}</p>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state slim"><p>未发现需要关注的问题。</p></div>
+  {% endif %}
+</section>
+
+<section>
+  <div class="section-head">
+    <h2>分层复核</h2>
+    <p class="muted">仅展示配置内分层；样本不足的分层不参与方向判断。</p>
+  </div>
+  {% for field in result.stratification.fields %}
+  <h3 class="field-title">{{ field.field }} <span class="mono-sub">{{ field.values }} 组{% if field.truncated %} · 已截断{% endif %}</span></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>分层</th><th class="num">对照 n</th><th class="num">实验 n</th><th class="num">效应</th><th class="num">p</th><th>判断</th></tr></thead>
+      <tbody>
+        {% for group in field.groups %}
+        <tr>
+          <td>{{ group.value }}</td>
+          <td class="num">{{ group.control_n }}</td>
+          <td class="num">{{ group.treatment_n }}</td>
+          <td class="num">{{ "%+.4f"|format(group.absolute_effect) }}</td>
+          <td class="num">{{ group.p_value|pval }}</td>
+          <td>
+            {% if group.reversal %}<span class="status fail">方向反转</span>
+            {% elif not group.eligible %}<span class="status neutral">样本不足</span>
+            {% elif group.favorable %}<span class="status pass">同向</span>
+            {% else %}<span class="status warn">反向</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="audit-foot">
+  <div>
+    <h2>规则评估轨迹</h2>
+    <p class="muted">优先级高者先命中；同样是声明式条件，不含任何代码执行。</p>
+  </div>
+  <details>
+    <summary>展开 {{ result.decision.trace|length }} 条规则</summary>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>规则</th><th class="num">优先级</th><th>候选</th><th>命中</th><th>理由</th></tr></thead>
+        <tbody>
+          {% for item in result.decision.trace %}
+          <tr>
+            <td class="mono-sub">{{ item.rule_id }}</td>
+            <td class="num">{{ item.priority }}</td>
+            <td>{{ DECISION_LABELS.get(item.card, item.card) }}</td>
+            <td>{{ "是" if item.matched else "否" }}</td>
+            <td>{{ item.reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  <dl class="hash-grid">
+    <div><dt>输入 SHA-256</dt><dd class="hash">{{ result.run.input_digest }}</dd></div>
+    <div><dt>配置 SHA-256</dt><dd class="hash">{{ result.run.config_digest }}</dd></div>
+  </dl>
+</section>
+{% endblock %}

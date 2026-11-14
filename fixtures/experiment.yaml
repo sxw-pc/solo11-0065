@@ -1,0 +1,136 @@
+schema_version: 1
+
+experiment:
+  id: exp-onboarding-card-2026
+  name: 新手引导卡片实验
+  owner: growth-analytics
+  hypothesis: 更清晰的引导卡片能提升新用户首日激活率，同时不推高崩溃率。
+  description: 合成样例实验。用于验证分流健康、主指标、护栏和分层方向反转的审计链路。
+  start: "2026-03-01T00:00:00+00:00"
+  end: "2026-03-15T00:00:00+00:00"
+
+control: control
+variants:
+  control:
+    label: 对照组
+  treatment:
+    label: 实验组
+
+split:
+  expected:
+    control: 0.5
+    treatment: 0.5
+  tolerance: 0.03
+  min_assignments: 1200
+
+exposure:
+  max_per_unit: 1
+  tolerance: 0
+
+mutual_exclusions:
+  - experiment_id: exp-checkout-copy-2026
+    label: 结算文案实验
+
+metrics:
+  primary:
+    key: activation_rate
+    column: activated
+    label: 激活率
+    kind: proportion
+    orientation: higher_is_better
+    min_effect: 0.02
+    alpha: 0.05
+  secondary:
+    - key: session_depth
+      column: session_depth
+      label: 会话深度
+      kind: mean
+      orientation: higher_is_better
+  guardrails:
+    - key: crash_rate
+      column: crashed
+      label: 崩溃率
+      kind: proportion
+      orientation: lower_is_better
+      max_degradation: 0.01
+      alpha: 0.05
+
+stratification:
+  fields:
+    - platform
+    - region
+  min_group_size: 80
+  max_groups: 12
+  alpha: 0.05
+  min_favorable_share: 0.75
+
+decision:
+  fallback: review
+  cards:
+    ship:
+      title: 可上线
+      action: 维持当前分流并放量；上线后继续监控护栏指标与分层效应。
+    iterate:
+      title: 继续迭代
+      action: 不直接放量；先解释分层反转或补齐证据，再提交下一轮审计。
+    stop:
+      title: 停止
+      action: 停止该实验，保留当前分流台账；若存在护栏问题，先回滚相关策略。
+    review:
+      title: 人工复核
+      action: 由实验负责人复核数据质量、分流关系与结论，修复后重新运行审计。
+  rules:
+    - id: stop-negative-or-guardrail
+      card: stop
+      priority: 130
+      reason: 主指标显著负向或护栏指标越界，继续放量的风险不可接受。
+      when:
+        any:
+          - flag: primary_negative_significant
+          - flag: guardrail_breach
+    - id: review-data-integrity
+      card: review
+      priority: 120
+      reason: 分流比例、重复曝光、互斥冲突或数据一致性未通过，先复核数据。
+      when:
+        any:
+          - flag: split_imbalanced
+          - flag: duplicate_exposure
+          - flag: mutex_conflict
+          - flag: data_quality_failed
+    - id: review-data-warning
+      card: review
+      priority: 100
+      reason: 数据质量存在告警，决策证据尚不可靠。
+      when:
+        any:
+          - flag: data_quality_warning
+    - id: ship-robust
+      card: ship
+      priority: 90
+      reason: 分流健康、主指标显著正向且分层稳健、护栏未越界。
+      when:
+        all:
+          - flag: split_balanced
+          - flag: no_duplicate_exposure
+          - flag: no_mutex_conflict
+          - flag: data_quality_ok
+          - flag: coverage_ok
+          - flag: sample_sufficient
+          - flag: primary_positive_significant
+          - flag: effect_meets_threshold
+          - flag: primary_effect_robust
+          - flag: no_guardrail_breach
+          - flag: no_guardrail_watch
+          - flag: no_stratified_reversal
+    - id: iterate-evidence
+      card: iterate
+      priority: 80
+      reason: 主指标证据不完整或分层存在反转/异质性，需要补证据或解释。
+      when:
+        any:
+          - flag: primary_inconclusive
+          - flag: sample_insufficient
+          - flag: stratified_reversal
+          - flag: guardrail_watch
+          - flag: effect_fragile

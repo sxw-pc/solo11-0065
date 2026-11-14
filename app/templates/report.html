@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>分流验台 · {{ experiment.name }}</title>
+  <style>
+    :root {
+      --ink: #18212f; --muted: #627087; --line: #dbe2ea; --paper: #ffffff;
+      --wash: #f4f7fa; --navy: #183b66; --accent: #0f766e;
+      --pass: #176b48; --pass-bg: #e7f6ed; --warn: #9a5b05;
+      --warn-bg: #fff4d8; --fail: #a22b2b; --fail-bg: #fdecec;
+      --ship: #176b48; --iterate: #9a5b05; --stop: #a22b2b; --review: #345c8c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--wash); color: var(--ink);
+      font: 15px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    a { color: var(--navy); }
+    .page { width: min(1120px, calc(100% - 32px)); margin: 28px auto 56px; }
+    .top {
+      display: flex; justify-content: space-between; gap: 20px;
+      padding: 22px 26px; background: var(--navy); color: #fff;
+      border-radius: 16px 16px 0 0;
+    }
+    .brand { font-size: 20px; font-weight: 700; letter-spacing: .08em; }
+    .sub { color: #cbd8e8; font-size: 13px; margin-top: 3px; }
+    .meta { text-align: right; font-size: 12px; color: #d6e3f2; }
+    main { background: var(--paper); padding: 28px; border-radius: 0 0 16px 16px; }
+    h1 { font-size: 28px; line-height: 1.25; margin: 0 0 6px; }
+    h2 { font-size: 19px; margin: 34px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 7px; }
+    h3 { font-size: 15px; margin: 18px 0 8px; }
+    p { margin: 8px 0; }
+    .lede { color: var(--muted); margin: 0 0 22px; }
+    .decision {
+      border: 1px solid var(--line); border-left: 7px solid var(--review);
+      background: var(--wash); border-radius: 12px; padding: 20px 22px;
+      display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px;
+    }
+    .decision.ship { border-left-color: var(--ship); }
+    .decision.iterate { border-left-color: var(--iterate); }
+    .decision.stop { border-left-color: var(--stop); }
+    .decision.review { border-left-color: var(--review); }
+    .eyebrow { font-size: 12px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
+    .decision-title { font-size: 27px; font-weight: 750; margin: 2px 0 3px; }
+    .decision.ship .decision-title { color: var(--ship); }
+    .decision.iterate .decision-title { color: var(--iterate); }
+    .decision.stop .decision-title { color: var(--stop); }
+    .decision.review .decision-title { color: var(--review); }
+    .action { color: var(--muted); }
+    .facts { display: grid; gap: 8px; align-content: center; }
+    .fact { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed var(--line); padding-bottom: 5px; }
+    .fact span:first-child { color: var(--muted); }
+    .fact strong { text-align: right; }
+    .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .tile { border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px; background: #fbfcfe; }
+    .tile-label { color: var(--muted); font-size: 12px; }
+    .tile-value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+    .tile-note { color: var(--muted); font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; vertical-align: top; padding: 8px 9px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; background: #f8fafc; white-space: nowrap; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .badge {
+      display: inline-block; border-radius: 999px; padding: 2px 9px;
+      font-size: 12px; font-weight: 650; white-space: nowrap;
+    }
+    .badge.pass, .badge.ok { color: var(--pass); background: var(--pass-bg); }
+    .badge.warn, .badge.watch, .badge.medium { color: var(--warn); background: var(--warn-bg); }
+    .badge.fail, .badge.breach, .badge.high, .badge.critical { color: var(--fail); background: var(--fail-bg); }
+    .badge.low, .badge.info { color: var(--navy); background: #eaf1f9; }
+    .checks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .check { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+    .check-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .check-summary { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .findings { display: grid; gap: 10px; }
+    .finding { border: 1px solid var(--line); border-radius: 10px; padding: 12px 15px; }
+    .finding h3 { margin: 5px 0 4px; }
+    .finding p { margin: 0; color: var(--muted); }
+    .finding-code { color: var(--muted); font: 12px/1.4 Consolas, monospace; }
+    .empty { color: var(--muted); background: var(--wash); border-radius: 10px; padding: 14px; }
+    details { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-top: 14px; }
+    summary { cursor: pointer; color: var(--muted); }
+    .foot { margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .hash { font: 12px/1.5 Consolas, monospace; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      .page { width: min(100% - 16px, 1120px); margin-top: 10px; }
+      main { padding: 18px; }
+      .top, .decision { grid-template-columns: 1fr; display: grid; }
+      .meta { text-align: left; }
+      .tiles, .checks { grid-template-columns: 1fr 1fr; }
+      .scroll { overflow-x: auto; }
+    }
+    @media print {
+      body { background: #fff; }
+      .page { width: 100%; margin: 0; }
+      main { border-radius: 0; padding: 0; }
+      details { display: block; }
+      details > summary { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <div>
+      <div class="brand">分流验台</div>
+      <div class="sub">本地 A/B 实验分流审计 · {{ experiment.id }}</div>
+    </div>
+    <div class="meta">
+      <div>run_id · {{ result.run.run_id }}</div>
+      <div>生成于 {{ generated_label }}</div>
+      <div>离线报告 · 可复现</div>
+    </div>
+  </header>
+  <main>
+    <h1>{{ experiment.name }}</h1>
+    <p class="lede">{{ experiment.hypothesis }}</p>
+
+    <section class="decision {{ decision.card }}" aria-label="决策卡">
+      <div>
+        <div class="eyebrow">Decision card</div>
+        <div class="decision-title">{{ decision.title }}</div>
+        <div class="action">{{ decision.action }}</div>
+      </div>
+      <div class="facts">
+        <div class="fact"><span>命中规则</span><strong>{{ decision.matched_rule }}</strong></div>
+        <div class="fact"><span>规则理由</span><strong>{{ decision.reason }}</strong></div>
+        <div class="fact"><span>决策卡</span><strong>{{ decision.card }}</strong></div>
+        <div class="fact"><span>输入摘要</span><strong class="hash">{{ result.run.input_digest[:16] }}…</strong></div>
+      </div>
+    </section>
+
+    <div class="tiles">
+      <div class="tile">
+        <div class="tile-label">主指标效应</div>
+        <div class="tile-value">{{ primary.absolute_effect|num }}</div>
+        <div class="tile-note">{{ primary.label }} · p={{ primary.p_value|pval }}</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">95% 置信区间</div>
+        <div class="tile-value">{{ primary.ci_low|num(3) }} – {{ primary.ci_high|num(3) }}</div>
+        <div class="tile-note">显著：{{ "是" if primary.significant else "否" }}</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">观测覆盖</div>
+        <div class="tile-value">{{ result.counts.observation_coverage|pct(1) }}</div>
+        <div class="tile-note">{{ result.counts.unique_observation_units }} 个唯一单元</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Finding</div>
+        <div class="tile-value">{{ result.findings|length }}</div>
+        <div class="tile-note">严重 {{ result.finding_counts.get("critical", 0) }} · 高 {{ result.finding_counts.get("high", 0) }}</div>
+      </div>
+    </div>
+
+    <h2>指标与护栏</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>指标</th><th>角色</th><th class="num">对照</th><th class="num">实验</th><th class="num">效应</th><th class="num">p 值</th><th>状态</th></tr></thead>
+        <tbody>
+          {% for metric in [primary] + result.metrics.secondary + result.metrics.guardrails %}
+          <tr>
+            <td>{{ metric.label }}<br><span class="finding-code">{{ metric.key }}</span></td>
+            <td>{{ metric.role }}</td>
+            <td class="num">{{ metric.control_value|num(4) }}<br><span class="finding-code">n={{ metric.control_n }}</span></td>
+            <td class="num">{{ metric.treatment_value|num(4) }}<br><span class="finding-code">n={{ metric.treatment_n }}</span></td>
+            <td class="num">{{ "%+.4f"|format(metric.absolute_effect) }}</td>
+            <td class="num">{{ metric.p_value|pval }}</td>
+            <td>
+              {% if metric.role == "guardrail" %}
+              <span class="badge {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
+              {% elif metric.significant %}
+              <span class="badge {{ "pass" if metric.favorable else "fail" }}">{{ "正向显著" if metric.favorable else "负向显著" }}</span>
+              {% else %}
+              <span class="badge low">不显著</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>自动检查</h2>
+    <div class="checks">
+      {% for check in result.checks %}
+      <div class="check">
+        <div class="check-head">
+          <strong>{{ check.label }}</strong>
+          <span class="badge {{ check.status }}">{{ CHECK_LABELS.get(check.status, check.status) }}</span>
+        </div>
+        <div class="check-summary">{{ check.summary }}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <h2>Findings</h2>
+    {% if result.findings %}
+    <div class="findings">
+      {% for finding in result.findings %}
+      <article class="finding">
+        <span class="badge {{ finding.severity }}">{{ SEVERITY_LABELS.get(finding.severity, finding.severity) }}</span>
+        <h3>{{ finding.title }}</h3>
+        <p>{{ finding.detail }}</p>
+        <div class="finding-code">{{ finding.code }} · {{ finding.category }}</div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">未发现需要关注的问题。</div>
+    {% endif %}
+
+    <h2>分层复核</h2>
+    {% for field in result.stratification.fields %}
+    <h3>{{ field.field }} <span class="finding-code">（{{ field.values }} 组{% if field.truncated %}，已截断{% endif %}）</span></h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>分层</th><th class="num">对照 n</th><th class="num">实验 n</th><th class="num">对照值</th><th class="num">实验值</th><th class="num">效应</th><th class="num">p 值</th><th>判断</th></tr></thead>
+        <tbody>
+          {% for group in field.groups %}
+          <tr>
+            <td>{{ group.value }}</td>
+            <td class="num">{{ group.control_n }}</td>
+            <td class="num">{{ group.treatment_n }}</td>
+            <td class="num">{{ group.control_value|num(4) }}</td>
+            <td class="num">{{ group.treatment_value|num(4) }}</td>
+            <td class="num">{{ "%+.4f"|format(group.absolute_effect) }}</td>
+            <td class="num">{{ group.p_value|pval }}</td>
+            <td>
+              {% if group.reversal %}<span class="badge fail">方向反转</span>
+              {% elif not group.eligible %}<span class="badge low">样本不足</span>
+              {% elif group.favorable %}<span class="badge pass">同向</span>
+              {% else %}<span class="badge warn">反向</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+
+    <h2>可复现性与审计轨迹</h2>
+    <p>统计计算仅使用 Python 标准库；运行期完全离线。除 run_id 与生成时间外，相同输入和配置产生相同内容。</p>
+    <table>
+      <tbody>
+        <tr><th>输入 SHA-256</th><td class="hash">{{ result.run.input_digest }}</td></tr>
+        <tr><th>配置 SHA-256</th><td class="hash">{{ result.run.config_digest }}</td></tr>
+        <tr><th>实验窗口</th><td>{{ experiment.start }} → {{ experiment.end }}</td></tr>
+        <tr><th>对照 / 实验</th><td>{{ primary.control_label }} / {{ primary.treatment_label }}</td></tr>
+      </tbody>
+    </table>
+    <details>
+      <summary>查看规则评估轨迹（{{ decision.trace|length }} 条）</summary>
+      <table>
+        <thead><tr><th>规则</th><th>优先级</th><th>候选决策</th><th>命中</th><th>理由</th></tr></thead>
+        <tbody>
+          {% for item in decision.trace %}
+          <tr>
+            <td>{{ item.rule_id }}</td>
+            <td class="num">{{ item.priority }}</td>
+            <td>{{ item.card }}</td>
+            <td>{{ "是" if item.matched else "否" }}</td>
+            <td>{{ item.reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    <div class="foot">
+      分流验台 · 仅供参考的本地审计报告，不执行任何上线动作，不连接外部服务。<br>
+      {{ result.headline }}
+    </div>
+  </main>
+</div>
+</body>
+</html>
