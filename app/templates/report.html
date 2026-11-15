@@ -252,6 +252,25 @@
         <tr><th>对照 / 实验</th><td>{{ primary.control_label }} / {{ primary.treatment_label }}</td></tr>
       </tbody>
     </table>
+    {% if result.get("snapshot") and result.snapshot.get("bound") %}
+    <h2>输入快照与可回放性</h2>
+    <p>本次 run 的解析对象、digest、产物与台账绑定同一份不可变输入字节；源文件事后被覆盖也可离线重算核对。</p>
+    <table>
+      <thead><tr><th>角色</th><th>快照文件</th><th class="num">字节</th><th>sha256</th></tr></thead>
+      <tbody>
+        {% for item in result.snapshot.files %}
+        <tr>
+          <td>{{ item.role }}</td>
+          <td>{{ item.name }}</td>
+          <td class="num">{{ item.size }}</td>
+          <td class="hash">{{ item.sha256 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">该 run 未绑定输入快照（历史 run），标记为不可重放；报告仍可正常查看。</p>
+    {% endif %}
     <details>
       <summary>查看规则评估轨迹（{{ decision.trace|length }} 条）</summary>
       <table>

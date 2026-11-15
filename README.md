@@ -127,23 +127,44 @@ python -m app ledger --db data/ledger.sqlite3
 python -m app ledger --db data/ledger.sqlite3 --decision iterate --limit 10
 ```
 
+### 离线回放（验证历史 run）
+
+每个新 run 都会把当时的 YAML/CSV 原始字节绑定进自己的快照目录，事后源文件被覆盖也能精确重算：
+
+```bash
+# 回放单个 run：只忽略 run_id 与生成时间，其余统计/findings/规则命中/决策逐项比对
+python -m app replay --run-id run-20261115T144232033212Z-6f30822c
+# 回放台账内全部 run（旧 run 标记为不可重放但不算失败）
+python -m app replay --all
+```
+
+回放结论写入该 run 的 `replay_status.json` 与台账回放列，**永不覆盖**原报告。
+生成于快照功能上线前的旧 run 仍可正常查询，但会明确标记为“不可重放 · 旧 run”。
+
 ---
 
 ## 一条命令做什么
 
 `python -m app demo --out out --db data/ledger.sqlite3` 会：
 
-1. 从 `fixtures/` 读取实验定义、分配与观测，并校验契约。
-2. 计算输入 SHA-256 摘要与配置摘要。
+1. 把 `fixtures/` 下的实验定义、分配与观测一次性复制进 run 暂存目录，固定为不可变输入快照；
+   此后解析、摘要、归档与台账登记全部只认这一份字节，源文件被并发替换也不会造成
+   “用版本 A 计算、登记版本 B 摘要”。
+2. 从快照字节校验契约并解析，计算输入 SHA-256 摘要与配置摘要。
 3. 生成运行 ID（含 UTC 时间戳与输入摘要前 8 位）和生成时间。
 4. 执行全部检查、指标统计、分层复核与规则决策。
-5. 写出：
+5. 在暂存目录写出全套产物与快照清单，再把暂存目录**原子发布**为正式 run 目录：
    - `out/<run_id>/audit.json`
    - `out/<run_id>/decision_card.json`
    - `out/<run_id>/report.md`
    - `out/<run_id>/report.html`
-6. 将运行、检查、finding、指标与分层写入 SQLite。
+   - `out/<run_id>/input_manifest.json`（快照清单：每文件角色、字节数、独立 sha256）
+   - `out/<run_id>/snapshot/{experiment.yaml,assignments.csv,observations.csv}`
+6. 将运行、检查、finding、指标、分层与快照绑定状态写入 SQLite。
 7. 在终端打印决策、命中规则、run_id 和产物路径。
+
+进程在台账提交前退出时，暂存/未登记目录不会被网页当作完整 run；台账提交后快照丢失，
+回放会把该 run 标为不可重放并保留旧报告，绝不拿当前源文件替补。
 
 ---
 
@@ -154,9 +175,11 @@ python -m app ledger --db data/ledger.sqlite3 --decision iterate --limit 10
 ├── app/
 │   ├── __init__.py
 │   ├── __main__.py          # python -m app
-│   ├── cli.py               # demo / audit / serve / ledger
+│   ├── cli.py               # demo / audit / replay / serve / ledger
 │   ├── config.py            # YAML 契约校验
-│   ├── data.py              # CSV 读取与输入校验
+│   ├── data.py              # CSV 读取与输入校验（含固定字节解析入口）
+│   ├── snapshot.py          # 输入快照捕获、暂存/原子发布与校验
+│   ├── replay.py            # 离线回放、逐项比对与状态落盘
 │   ├── safety.py            # 根目录约束、路径逃逸检查、回环地址
 │   ├── models.py            # 数据类
 │   ├── stats.py             # 标准库统计实现
@@ -182,6 +205,7 @@ python -m app ledger --db data/ledger.sqlite3 --decision iterate --limit 10
 │   ├── test_config_data.py
 │   ├── test_audit_checks.py
 │   ├── test_decision_report_ledger.py
+│   ├── test_snapshot_replay.py
 │   └── test_web_cli.py
 ├── data/                    # 默认 SQLite 台账目录
 ├── out/                     # 默认报告产物目录

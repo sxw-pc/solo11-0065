@@ -167,9 +167,17 @@ def _decision(raw: Any) -> DecisionSpec:
 def load_config(path: Path) -> ExperimentConfig:
     """读取并校验 YAML。任何未知或不完整字段都会被明确拒绝。"""
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        return load_config_from_bytes(path.read_bytes(), path.name)
+    except OSError as exc:
         raise ConfigError(f"无法读取配置 {path.name}: {exc}") from exc
+
+
+def load_config_from_bytes(payload: bytes, display_name: str) -> ExperimentConfig:
+    """从固定字节解析 YAML；回放与正式 run 共用同一条校验路径。"""
+    try:
+        raw = yaml.safe_load(payload.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"无法读取配置 {display_name}: {exc}") from exc
     root = _mapping(raw, "root")
     version = _integer(root.get("schema_version", 0), "schema_version", low=1)
     if version != SCHEMA_VERSION:

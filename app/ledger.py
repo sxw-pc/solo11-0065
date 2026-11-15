@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS runs (
     input_digest TEXT NOT NULL,
     config_digest TEXT NOT NULL,
     artifact_dir TEXT NOT NULL,
-    decision_json TEXT NOT NULL
+    decision_json TEXT NOT NULL,
+    snapshot_bound INTEGER NOT NULL DEFAULT 0,
+    replay_status TEXT,
+    replay_checked_at TEXT,
+    replay_mismatch_count INTEGER,
+    replay_detail_json TEXT
 );
 CREATE TABLE IF NOT EXISTS checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,13 +104,41 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+_MIGRATION_COLUMNS = {
+    "snapshot_bound": "INTEGER NOT NULL DEFAULT 0",
+    "replay_status": "TEXT",
+    "replay_checked_at": "TEXT",
+    "replay_mismatch_count": "INTEGER",
+    "replay_detail_json": "TEXT",
+}
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """对既有台账增量加列；旧 run 快照列为默认值，查询时再按目录实况判定。"""
+    existing = {
+        row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    for column, declaration in _MIGRATION_COLUMNS.items():
+        if column not in existing:
+            connection.execute(
+                f"ALTER TABLE runs ADD COLUMN {column} {declaration}"
+            )
+
+
 def init_db(db_path: Path) -> None:
     with closing(connect(db_path)) as connection:
         connection.executescript(SCHEMA)
+        _migrate(connection)
         connection.commit()
 
 
-def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
+def save_run(
+    db_path: Path,
+    result: dict[str, Any],
+    artifact_dir: str,
+    *,
+    snapshot_bound: bool = False,
+) -> None:
     run = result["run"]
     run_id = run["run_id"]
     if not RUN_ID_RE.match(run_id):
@@ -122,15 +155,16 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
                 run_id, generated_at, experiment_id, experiment_name, decision,
                 decision_title, matched_rule, decision_reason, headline,
                 primary_metric_key, primary_effect, primary_p_value, finding_count,
-                input_digest, config_digest, artifact_dir, decision_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_digest, config_digest, artifact_dir, decision_json,
+                snapshot_bound
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id, run["generated_at"], experiment["id"], experiment["name"],
                 decision["card"], decision["title"], decision["matched_rule"],
                 decision["reason"], result["headline"], primary["key"],
                 primary["absolute_effect"], primary["p_value"],
                 len(result["findings"]), run["input_digest"], run["config_digest"],
-                artifact_dir, _json(decision),
+                artifact_dir, _json(decision), int(bool(snapshot_bound)),
             ),
         )
         connection.executemany(
@@ -219,3 +253,31 @@ def count_runs(db_path: Path) -> int:
     with closing(connect(db_path)) as connection:
         row = connection.execute("SELECT COUNT(*) AS total FROM runs").fetchone()
         return int(row["total"])
+
+
+def update_replay_status(
+    db_path: Path,
+    run_id: str,
+    *,
+    replay_status: str,
+    checked_at: str,
+    mismatch_count: int | None,
+    detail: dict[str, Any],
+    snapshot_bound: bool,
+) -> None:
+    """把回放结论写回台账；只更新回放列，审计产物与原始列保持不动。"""
+    if not RUN_ID_RE.match(run_id):
+        raise ValueError("run_id 不符合台账约束")
+    init_db(db_path)
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            """UPDATE runs SET replay_status = ?, replay_checked_at = ?,
+               replay_mismatch_count = ?, replay_detail_json = ?,
+               snapshot_bound = ? WHERE run_id = ?""",
+            (
+                replay_status, checked_at, mismatch_count, _json(detail),
+                int(bool(snapshot_bound)), run_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"台账中没有该 run：{run_id}")

@@ -1,4 +1,4 @@
-"""命令行入口：demo / audit / serve / ledger。"""
+"""命令行入口：demo / audit / replay / serve / ledger。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import ledger
+from . import ledger, replay, snapshot
 from .audit import run_audit
-from .config import ConfigError, load_config
-from .data import DataValidationError, load_dataset, sha256_bytes, sha256_files
+from .config import ConfigError, load_config_from_bytes
+from .data import DataValidationError, load_dataset_from_bytes
 from .reporting import write_artifacts
 from .safety import PathSecurityError, ensure_local_host, ensure_output_path, resolve_under
+from .snapshot import (
+    ROLE_ASSIGNMENTS,
+    ROLE_CONFIG,
+    ROLE_OBSERVATIONS,
+)
+from .replay import (
+    STATUS_MATCH,
+    STATUS_UNREPLAYABLE,
+    replay_run,
+)
 from .web import create_app
 
 DEFAULT_CONFIG = "fixtures/experiment.yaml"
@@ -36,33 +46,51 @@ def _run_pipeline(
     out_dir: Path,
     db_path: Path,
 ) -> tuple[dict[str, Any], Path, Path]:
-    config_target = resolve_under(root, config_path, must_exist=True)
-    assignments_target = resolve_under(root, assignments_path, must_exist=True)
-    observations_target = resolve_under(root, observations_path, must_exist=True)
+    # 路径约束先行：后续所有文件访问都在 root 内。
     output_root = resolve_under(root, out_dir)
     ledger_target = ensure_output_path(root, db_path)
-    config = load_config(config_target)
-    dataset = load_dataset(config, assignments_target, observations_target)
-    now = datetime.now(timezone.utc)
-    input_digest = sha256_files(
-        [config_target, assignments_target, observations_target]
+
+    # 第一步即把三份输入固定为暂存快照。read_bytes 之后源文件再被替换，
+    # 解析、digest、归档与台账登记也全部只认这一份字节，消除读文件与哈希之间的竞态。
+    captured = snapshot.capture_snapshot(
+        root, config_path, assignments_path, observations_path, output_root
     )
-    config_digest = sha256_bytes(config_target.read_bytes())
-    run_id = f"run-{now:%Y%m%dT%H%M%S%fZ}-{input_digest[:8]}"
-    result = run_audit(
-        config,
-        dataset.assignments,
-        dataset.observations,
-        run_id=run_id,
-        generated_at=now.isoformat(timespec="seconds"),
-        input_digest=input_digest,
-        config_digest=config_digest,
-    )
-    run_dir = output_root / run_id
-    ensure_output_path(root, run_dir / "audit.json")
-    write_artifacts(result, run_dir)
-    relative = run_dir.relative_to(root).as_posix()
-    ledger.save_run(ledger_target, result, relative)
+    try:
+        config = load_config_from_bytes(
+            captured.bytes_for(ROLE_CONFIG), captured.name_for(ROLE_CONFIG)
+        )
+        dataset = load_dataset_from_bytes(
+            config,
+            captured.bytes_for(ROLE_ASSIGNMENTS),
+            captured.name_for(ROLE_ASSIGNMENTS),
+            captured.bytes_for(ROLE_OBSERVATIONS),
+            captured.name_for(ROLE_OBSERVATIONS),
+        )
+        now = datetime.now(timezone.utc)
+        run_id = f"run-{now:%Y%m%dT%H%M%S%fZ}-{captured.input_digest[:8]}"
+        result = run_audit(
+            config,
+            dataset.assignments,
+            dataset.observations,
+            run_id=run_id,
+            generated_at=now.isoformat(timespec="seconds"),
+            input_digest=captured.input_digest,
+            config_digest=captured.config_digest,
+            snapshot=captured.result_block(),
+        )
+        run_dir = output_root / run_id
+        # 报告先全部写进暂存目录；任何失败都只回滚暂存，正式 out/ 不出现半成品。
+        write_artifacts(result, captured.staging_dir)
+        # 暂存目录整体原子发布：网页只能看到带齐全套产物与快照的 run 目录。
+        snapshot.publish_snapshot(captured.staging_dir, run_dir)
+    except BaseException:
+        snapshot.discard_snapshot(captured.staging_dir)
+        raise
+
+    # 台账是“完整 run”的唯一登记处。若进程在这之前退出，run 目录不会被网页查询到；
+    # 若在这之后快照丢失，回放会把该 run 标为不可重放，并保留旧报告、不替补当前源文件。
+    relative = run_dir.relative_to(Path(root).resolve()).as_posix()
+    ledger.save_run(ledger_target, result, relative, snapshot_bound=True)
     return result, run_dir, ledger_target
 
 
@@ -73,6 +101,7 @@ def _print_result(result: dict[str, Any], run_dir: Path, db_path: Path) -> None:
     print(f"finding：{len(result['findings'])} 条；输入摘要 {result['run']['input_digest'][:16]}…")
     print(f"产物目录：{run_dir}")
     print("  audit.json / decision_card.json / report.md / report.html")
+    print("  input_manifest.json / snapshot/（绑定输入，支持离线 replay）")
     print(f"SQLite 台账：{db_path}")
 
 
@@ -147,6 +176,60 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay(args: argparse.Namespace) -> int:
+    root = _root(args.root)
+    out_root = resolve_under(root, Path(args.out))
+    db_path = resolve_under(root, Path(args.db))
+
+    if args.all:
+        target_ids = [row["run_id"] for row in ledger.list_runs(db_path, limit=200)]
+        if not target_ids:
+            print("台账中没有 run，无可回放对象。")
+            return 0
+    else:
+        if not args.run_id:
+            print("错误：replay 需要 --run-id 或 --all", file=sys.stderr)
+            return 2
+        target_ids = [args.run_id]
+
+    any_mismatch = False
+    non_replayable_single = False
+    for run_id in target_ids:
+        try:
+            run_dir = resolve_under(out_root, Path(run_id), must_exist=True)
+        except (PathSecurityError, OSError) as exc:
+            print(f"{run_id}: run 目录不可读取：{exc}", file=sys.stderr)
+            any_mismatch = True
+            continue
+        outcome = replay_run(run_dir, db_path if db_path.exists() else None)
+        if outcome.status == STATUS_MATCH:
+            print(f"{run_id}: 回放一致（仅忽略 run_id/generated_at）")
+        elif outcome.status == STATUS_UNREPLAYABLE:
+            if not args.all:
+                non_replayable_single = True
+            if outcome.detail.get("reason") == "legacy_no_snapshot":
+                label = "不可重放 · 旧 run 无输入快照"
+            else:
+                label = f"不可重放（{outcome.detail.get('reason')}）"
+            print(f"{run_id}: {label}，保留原报告且不替补当前源文件")
+        else:
+            # STATUS_MISMATCH 与 STATUS_REPLAY_ERROR 都视为失败。
+            any_mismatch = True
+            if outcome.status == "replay_error":
+                print(f"{run_id}: 回放执行出错：{outcome.detail.get('error')}",
+                      file=sys.stderr)
+            else:
+                print(f"{run_id}: 回放不一致，差异 {outcome.mismatch_count} 处，"
+                      f"详见 {replay.REPLAY_FILENAME}")
+                for diff in outcome.detail.get("diffs", [])[:10]:
+                    print(f"  - {diff['path']}（{diff['kind']}）")
+    # 批量模式下存在不可重放的旧 run 属正常历史，只有真正的内容差异才返回非零；
+    # 显式指定单个 run 时，不可重放同样以非零退出，便于脚本感知。
+    if args.all:
+        return 1 if any_mismatch else 0
+    return 1 if (any_mismatch or non_replayable_single) else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app",
@@ -182,6 +265,16 @@ def build_parser() -> argparse.ArgumentParser:
     board.add_argument("--limit", type=int, default=20)
     board.add_argument("--decision", choices=("ship", "iterate", "stop", "review"))
     board.set_defaults(handler=_cmd_ledger)
+
+    replay_cmd = sub.add_parser(
+        "replay", help="用 run 绑定的输入快照离线重算并核对原报告"
+    )
+    target = replay_cmd.add_mutually_exclusive_group(required=True)
+    target.add_argument("--run-id", help="指定单个 run_id 回放")
+    target.add_argument("--all", action="store_true", help="回放台账内全部 run")
+    replay_cmd.add_argument("--out", default=DEFAULT_OUT)
+    replay_cmd.add_argument("--db", default=DEFAULT_DB)
+    replay_cmd.set_defaults(handler=_cmd_replay)
     return parser
 
 

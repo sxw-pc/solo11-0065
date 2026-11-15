@@ -31,6 +31,50 @@
   </dl>
 </section>
 
+<section class="replay-panel">
+  <div class="section-head">
+    <h2>输入快照与离线回放</h2>
+    {% if not snapshot_view.snapshot_bound %}
+    <span class="status neutral">不可重放 · 旧 run</span>
+    {% elif not snapshot_view.replayable %}
+    <span class="status fail">不可重放（{{ snapshot_view.reason }}）</span>
+    {% elif snapshot_view.replay_status == 'match' %}
+    <span class="status pass">回放一致</span>
+    {% elif snapshot_view.replay_status == 'mismatch' %}
+    <span class="status fail">回放不一致 · {{ snapshot_view.replay_mismatch_count }} 处差异</span>
+    {% else %}
+    <span class="status neutral">已绑定 · 待回放</span>
+    {% endif %}
+  </div>
+  {% if not snapshot_view.snapshot_bound %}
+  <p class="muted">该 run 生成于快照功能上线前，没有绑定输入字节；报告仍可正常查询，但无法从原始输入精确重算。</p>
+  {% elif not snapshot_view.replayable %}
+  <p class="muted">绑定快照已丢失或损坏（{{ snapshot_view.reason }}）。系统保留原报告，且不会用当前源文件替补。</p>
+  {% else %}
+  <p class="muted">解析对象、digest、产物与台账由同一份快照字节决定；可执行
+    <code>python -m app replay --run-id {{ row.run_id }}</code> 离线重算，比对时只忽略 run_id 与生成时间。</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>角色</th><th>快照文件</th><th class="num">字节</th><th>sha256</th><th></th></tr></thead>
+      <tbody>
+        {% for item in snapshot_view.snapshot_files %}
+        <tr>
+          <td>{{ item.role }}</td>
+          <td>{{ item.name }}</td>
+          <td class="num">{{ item.size }}</td>
+          <td class="hash">{{ item.sha256[:24] }}…</td>
+          <td><a href="{{ url_for('snapshot_file', run_id=row.run_id, name=item.name) }}">下载</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="mono-sub">清单：<a href="{{ url_for('snapshot_manifest', run_id=row.run_id) }}">input_manifest.json</a>
+    {% if snapshot_view.replay_checked_at %} · 最近回放：{{ snapshot_view.replay_checked_at.replace("T", " ")[:19] }}{% endif %}
+  </p>
+  {% endif %}
+</section>
+
 <section class="stat-strip compact">
   <div class="stat">
     <span>主指标效应</span>

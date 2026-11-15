@@ -70,12 +70,14 @@
         <th class="num">主指标效应</th>
         <th class="num">p 值</th>
         <th class="num">Finding</th>
+        <th>可回放</th>
         <th>生成时间</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for row in runs %}
+      {% set snap = snapshot_views[row.run_id] %}
       <tr>
         <td>
           <a class="run-name" href="{{ url_for('run_detail', run_id=row.run_id) }}">{{ row.experiment_name }}</a>
@@ -85,6 +87,19 @@
         <td class="num">{{ "%+.4f"|format(row.primary_effect) }}</td>
         <td class="num">{{ row.primary_p_value|pval }}</td>
         <td class="num">{{ row.finding_count }}</td>
+        <td>
+          {% if not snap.snapshot_bound %}
+          <span class="status neutral" title="历史 run，未绑定输入快照">不可重放 · 旧 run</span>
+          {% elif not snap.replayable %}
+          <span class="status fail" title="快照缺失或损坏：{{ snap.reason }}">不可重放</span>
+          {% elif snap.replay_status == 'match' %}
+          <span class="status pass">回放一致</span>
+          {% elif snap.replay_status == 'mismatch' %}
+          <span class="status fail">回放不一致</span>
+          {% else %}
+          <span class="status neutral" title="已绑定快照，等待执行 replay">已绑定 · 待回放</span>
+          {% endif %}
+        </td>
         <td class="time">{{ row.generated_at.replace("T", " ")[:19] }}</td>
         <td class="row-actions">
           <a href="{{ url_for('run_detail', run_id=row.run_id) }}">详情</a>

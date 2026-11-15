@@ -1,9 +1,14 @@
-"""CSV 输入契约与解析。所有数据都是合成 fixture，不做任何外部访问。"""
+"""CSV 输入契约与解析。所有数据都是合成 fixture，不做任何外部访问。
+
+解析同时提供字节入口（``io.BytesIO``），让 run 可以从已固定的快照字节解析，
+而不是再次触碰可能已被替换的源文件。
+"""
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import math
 import re
 from datetime import datetime, timezone
@@ -39,17 +44,24 @@ def _parse_time(value: str, path: str, line: int) -> datetime:
 
 def _rows(path: Path, required: Iterable[str]) -> list[dict[str, str]]:
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            headers = tuple(reader.fieldnames or ())
-            missing = [name for name in required if name not in headers]
-            if missing:
-                raise DataValidationError(f"{path.name} 缺少列：{', '.join(missing)}")
-            rows = list(reader)
+        return _rows_from_bytes(path.read_bytes(), path.name, required)
     except OSError as exc:
         raise DataValidationError(f"无法读取 {path.name}: {exc}") from exc
+
+
+def _rows_from_bytes(
+    payload: bytes, display_name: str, required: Iterable[str]
+) -> list[dict[str, str]]:
+    """从固定字节解析 CSV；调用方负责保证字节与 digest 来自同一份快照。"""
+    handle = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8-sig", newline="")
+    reader = csv.DictReader(handle)
+    headers = tuple(reader.fieldnames or ())
+    missing = [name for name in required if name not in headers]
+    if missing:
+        raise DataValidationError(f"{display_name} 缺少列：{', '.join(missing)}")
+    rows = list(reader)
     if not rows:
-        raise DataValidationError(f"{path.name} 没有数据行")
+        raise DataValidationError(f"{display_name} 没有数据行")
     return rows
 
 
@@ -66,8 +78,16 @@ def _metric_value(raw: str, kind: str, path: str, line: int, column: str) -> flo
 
 
 def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
+    return load_assignments_from_bytes(
+        path.read_bytes(), path.name, config
+    )
+
+
+def load_assignments_from_bytes(
+    payload: bytes, display_name: str, config: ExperimentConfig
+) -> list[Assignment]:
     strata_fields = list(config.stratification.fields)
-    rows = _rows(path, (*BASE_ASSIGNMENT_COLUMNS, *strata_fields))
+    rows = _rows_from_bytes(payload, display_name, (*BASE_ASSIGNMENT_COLUMNS, *strata_fields))
     variant_keys = {variant.key for variant in config.variants}
     assignments: list[Assignment] = []
     for index, row in enumerate(rows, start=2):
@@ -76,22 +96,22 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
         variant = (row.get("variant") or "").strip()
         if not UNIT_RE.match(unit_id):
             raise DataValidationError(
-                f"{path.name}:{index} unit_id 必须形如 unit-0001"
+                f"{display_name}:{index} unit_id 必须形如 unit-0001"
             )
         if not SLUG_RE.match(experiment_id):
-            raise DataValidationError(f"{path.name}:{index} experiment_id 不合法")
+            raise DataValidationError(f"{display_name}:{index} experiment_id 不合法")
         if experiment_id == config.experiment_id and variant not in variant_keys:
             raise DataValidationError(
-                f"{path.name}:{index} 未知变体：{variant!r}"
+                f"{display_name}:{index} 未知变体：{variant!r}"
             )
         if not variant:
-            raise DataValidationError(f"{path.name}:{index} variant 不能为空")
+            raise DataValidationError(f"{display_name}:{index} variant 不能为空")
         strata: dict[str, str] = {}
         for field in strata_fields:
             value = (row.get(field) or "").strip()
             if not LABEL_RE.match(value):
                 raise DataValidationError(
-                    f"{path.name}:{index} 分层字段 {field} 必须是安全短标签"
+                    f"{display_name}:{index} 分层字段 {field} 必须是安全短标签"
                 )
             strata[field] = value
         assignments.append(
@@ -99,7 +119,7 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
                 unit_id=unit_id,
                 experiment_id=experiment_id,
                 variant=variant,
-                assigned_at=_parse_time(row["assigned_at"], path.name, index),
+                assigned_at=_parse_time(row["assigned_at"], display_name, index),
                 strata=strata,
             )
         )
@@ -107,9 +127,15 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
 
 
 def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]:
+    return load_observations_from_bytes(path.read_bytes(), path.name, config)
+
+
+def load_observations_from_bytes(
+    payload: bytes, display_name: str, config: ExperimentConfig
+) -> list[Observation]:
     specs = (config.primary, *config.secondary, *config.guardrails)
     columns = [spec.column for spec in specs]
-    rows = _rows(path, (*BASE_OBSERVATION_COLUMNS, *columns))
+    rows = _rows_from_bytes(payload, display_name, (*BASE_OBSERVATION_COLUMNS, *columns))
     variant_keys = {variant.key for variant in config.variants}
     observations: list[Observation] = []
     for index, row in enumerate(rows, start=2):
@@ -118,19 +144,19 @@ def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]
         variant = (row.get("variant") or "").strip()
         if not UNIT_RE.match(unit_id):
             raise DataValidationError(
-                f"{path.name}:{index} unit_id 必须形如 unit-0001"
+                f"{display_name}:{index} unit_id 必须形如 unit-0001"
             )
         if not SLUG_RE.match(experiment_id):
-            raise DataValidationError(f"{path.name}:{index} experiment_id 不合法")
+            raise DataValidationError(f"{display_name}:{index} experiment_id 不合法")
         if experiment_id == config.experiment_id and variant not in variant_keys:
             raise DataValidationError(
-                f"{path.name}:{index} 未知变体：{variant!r}"
+                f"{display_name}:{index} 未知变体：{variant!r}"
             )
         if not variant:
-            raise DataValidationError(f"{path.name}:{index} variant 不能为空")
+            raise DataValidationError(f"{display_name}:{index} variant 不能为空")
         values = {
             spec.key: _metric_value(
-                row[spec.column], spec.kind, path.name, index, spec.column
+                row[spec.column], spec.kind, display_name, index, spec.column
             )
             for spec in specs
         }
@@ -139,7 +165,7 @@ def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]
                 unit_id=unit_id,
                 experiment_id=experiment_id,
                 variant=variant,
-                observed_at=_parse_time(row["observed_at"], path.name, index),
+                observed_at=_parse_time(row["observed_at"], display_name, index),
                 values=values,
             )
         )
@@ -152,6 +178,24 @@ def load_dataset(
     return Dataset(
         assignments=load_assignments(assignments_path, config),
         observations=load_observations(observations_path, config),
+    )
+
+
+def load_dataset_from_bytes(
+    config: ExperimentConfig,
+    assignments_payload: bytes,
+    assignments_name: str,
+    observations_payload: bytes,
+    observations_name: str,
+) -> Dataset:
+    """从快照字节构建数据集；整个 run 不再重新打开源 CSV。"""
+    return Dataset(
+        assignments=load_assignments_from_bytes(
+            assignments_payload, assignments_name, config
+        ),
+        observations=load_observations_from_bytes(
+            observations_payload, observations_name, config
+        ),
     )
 
 

@@ -147,6 +147,31 @@ def render_markdown(result: dict[str, Any]) -> str:
             "",
         ]
     )
+    snapshot = result.get("snapshot") or {}
+    if snapshot.get("bound"):
+        lines.extend([
+            "## 输入快照与可回放性",
+            "",
+            f"- 快照目录：`{snapshot['directory']}/`，清单：`{snapshot['manifest']}`",
+            "- 本次 run 的解析对象、digest、产物与台账均绑定同一份不可变输入字节。",
+        ])
+        for item in snapshot["files"]:
+            lines.append(
+                f"- `{item['name']}`（{item['role']}）· {item['size']} 字节 · "
+                f"sha256 `{item['sha256']}`"
+            )
+        lines.append(
+            "- 离线回放：`python -m app replay --run-id "
+            f"{result['run']['run_id']}`，只忽略 run_id 与生成时间。"
+        )
+        lines.append("")
+    else:
+        lines.extend([
+            "## 输入快照与可回放性",
+            "",
+            "- 该 run 生成于快照功能上线前，未绑定输入快照，标记为不可重放；仍可正常查询。",
+            "",
+        ])
     return "\n".join(lines)
 
 

@@ -58,6 +58,7 @@ def run_audit(
     generated_at: str,
     input_digest: str,
     config_digest: str,
+    snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     primary_assignments = [
         row for row in assignments if row.experiment_id == config.experiment_id
@@ -171,6 +172,7 @@ def run_audit(
             "input_digest": input_digest,
             "config_digest": config_digest,
         },
+        "snapshot": snapshot or {"bound": False},
         "experiment": config_payload(config),
         "counts": counts,
         "flags": dict(sorted(flags.items())),
