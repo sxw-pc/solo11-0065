@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -17,12 +17,25 @@ SEVERITY_LABELS = {
     "info": "提示",
 }
 CHECK_LABELS = {"pass": "通过", "warn": "关注", "fail": "未通过"}
+PHASE_STATUS_LABELS = {
+    "pass": "通过",
+    "warn": "关注",
+    "fail": "未通过",
+    "unverified": "样本不足",
+}
 DECISION_LABELS = {
     "ship": "可上线",
     "iterate": "继续迭代",
     "stop": "停止",
     "review": "人工复核",
 }
+
+
+def _as_utc(value: datetime) -> datetime:
+    """把时间统一到 UTC，便于跨阶段边界比较。"""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -48,10 +61,48 @@ class MetricSpec:
 
 
 @dataclass(frozen=True)
+class AllocationPhase:
+    """实验 rollout 的一个时间阶段及其当时的声明分流比例。"""
+
+    key: str
+    start: datetime
+    end: datetime
+    expected: dict[str, float]
+    min_assignments: int
+
+    def contains(self, moment: datetime, *, include_end: bool = False) -> bool:
+        moment = _as_utc(moment)
+        start = _as_utc(self.start)
+        end = _as_utc(self.end)
+        return start <= moment < end or (include_end and moment == end)
+    @property
+    def id(self) -> str:
+        """配置里常用的别名。"""
+        return self.key
+
+    @property
+    def name(self) -> str:
+        """配置里常用的别名。"""
+        return self.key
+
+
+@dataclass(frozen=True)
 class SplitSpec:
     expected: dict[str, float]
     tolerance: float
     min_assignments: int
+    phases: tuple[AllocationPhase, ...] = ()
+
+    @property
+    def phased(self) -> bool:
+        return bool(self.phases)
+
+    def phase_key_at(self, moment: datetime) -> str | None:
+        """返回 UTC 时间点所属的阶段 key；实验终点的等点归最后一段。"""
+        for index, phase in enumerate(self.phases):
+            if phase.contains(moment, include_end=index == len(self.phases) - 1):
+                return phase.key
+        return None
 
 
 @dataclass(frozen=True)
@@ -133,6 +184,8 @@ class Assignment:
     variant: str
     assigned_at: datetime
     strata: dict[str, str]
+    # 由 data.load_assignments 按 assigned_at 预计算的稳定阶段键；静态配置下为 None。
+    phase_key: str | None = None
 
 
 @dataclass(frozen=True)

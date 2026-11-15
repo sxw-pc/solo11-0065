@@ -216,6 +216,18 @@ split:
   expected: { control: 0.5, treatment: 0.5 }
   tolerance: 0.03
   min_assignments: 1200
+# 可选：按时间分阶段的 rollout 计划
+# phases:
+#   - key: ramp-90-10
+#     start: "2026-03-01T00:00:00+00:00"
+#     end: "2026-03-08T00:00:00+00:00"
+#     expected: { control: 0.9, treatment: 0.1 }
+#     min_assignments: 500
+#   - key: even-50-50
+#     start: "2026-03-08T00:00:00+00:00"
+#     end: "2026-03-15T00:00:00+00:00"
+#     expected: { control: 0.5, treatment: 0.5 }
+#     min_assignments: 500
 exposure:
   max_per_unit: 1
   tolerance: 0
@@ -255,8 +267,9 @@ decision:
 
 - `schema_version` 必须为 `1`。
 - 只支持一个对照 + 一个实验变体，变体键必须是 slug。
-- `split.expected` 必须覆盖全部变体、每项大于 0、总和为 1。
+- `split.expected` 必须覆盖全部变体、每项在 `[0, 1]`、总和为 1。
 - `split.tolerance` 在 `[0, 0.5]`，`min_assignments >= 2`。
+- `split.phases` 可选；声明后按时间逐段核验，具体契约见“分阶段流量计划”。
 - 指标 `kind` 为 `proportion` 或 `mean`；`orientation` 为 `higher_is_better` 或 `lower_is_better`。
 - 指标 key 唯一；至少声明一个护栏。
 - 护栏的 `max_degradation` 对比例指标不能大于 1。
@@ -307,7 +320,7 @@ decision:
 
 | 检查 | 问题 | 触发方式 |
 | --- | --- | --- |
-| `split.balance` | 分流比例失衡 | 比例偏差超过 `tolerance`，或卡方 p 值异常 |
+| `split.balance` | 分流比例失衡 | 比例偏差超过 `tolerance`，或卡方 p 值异常；分阶段配置下逐段判定 |
 | `exposure.duplicate` | 重复分配 / 重复曝光 | 单 unit 次数超过 `max_per_unit` 且额外次数超过 `tolerance` |
 | `mutex.conflict` | 互斥实验冲突 | 本实验 unit 也出现在声明的互斥实验分配中 |
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
@@ -324,6 +337,33 @@ decision:
 - 计算每个变体的观测占比与期望占比的绝对偏差。
 - 用卡方拟合优度检验（`k-1` 自由度）给出总体 p 值。
 - 任一变体偏差超过配置容差即失败；未超过容差但卡方 p 值低于 `0.05` 时告警。
+
+### 分阶段流量计划
+
+A/B 实验常见的 ramp（例如前半程 control/treatment `90/10`、后半程 `50/50`）
+无法用单一全程比例表达。配置 `split.phases` 后，审计改为逐段核验：
+
+- 每段声明 `key`、`start`、`end`、`expected` 与 `min_assignments`。
+- 边界是 UTC 半开区间 `[start, end)`；相邻阶段必须首尾相接，不得重叠或留空档，且整体覆盖实验窗口。
+- 每个阶段的 `expected` 必须覆盖全部变体且和为 1；允许 `0` 比例，用于 `0%` 起量的阶段。
+- 用 `Assignment.assigned_at` 把唯一 unit 归入确切阶段，`experiment.end` 的等点归最后一段。
+- 逐段独立计算 counts、实际比例、偏差、卡方与状态；整体 `split.balance` 由最差阶段决定：
+  任一阶段 `fail` → 整体 `fail`；否则任一阶段样本不足或 `warn` → 整体 `warn`；全部 `pass` 才 `pass`。
+- 某段唯一 unit 少于该段 `min_assignments` 时，该段为 `unverified`，不据此判定真实失衡，
+  但会以 `warn` 与 `split.phase_insufficient` finding 进入决策。
+- 若某段实际比例在容差内但卡方 p 值低于 `0.05`，该段为 `warn`（`split.phase_imbalance`，medium）。
+- 同一 unit 在一个阶段内出现多条分配只计一次；同 variant 的重复由 `exposure.duplicate` 处理。
+- 同一 unit 的分配跨阶段重复时，单独产生 `split.phase_reassignment`（high）finding，
+  该 unit 从所有阶段计数中剔除，整体分流结论直接 `fail`，避免阶段检查因重复计数伪装成通过。
+- 不在任何阶段内的本实验 unit 不计入阶段比例，数量与样本记录在 `outside_schedule_*`。
+
+选择逐段判定而非“按各阶段样本量合并 likelihood”，是因为审计对象是每段已声明的
+traffic allocation：合并检验会在两段偏差方向相反时相互抵消，把失配阶段报告为通过。
+逐段判定的代价是某段样本不足时只能给出 `unverified/warn`，不会被大阶段稀释成 `pass`。
+
+未配置 `split.phases` 的旧配置保持原有全程汇总逻辑与输出格式。阶段级证据（计划窗口、
+实际 counts、比例、偏差、卡方、样本不足与跨段重复原因）会写入 `audit.json`
+的 `split.balance.details.phases`、决策卡 `split_phases`、Markdown / HTML 报告与本地 Web。
 
 ### 统计推断
 
@@ -425,7 +465,10 @@ when:
 
 | flag | 含义 |
 | --- | --- |
-| `split_balanced` / `split_imbalanced` | 分流检查通过 / 未通过 |
+| `split_balanced` / `split_imbalanced` | 分流检查通过 / 未通过（分阶段配置下由最差阶段决定） |
+| `split_phase_failed` | 分阶段配置下至少一个阶段真实失衡（仅分阶段配置提供） |
+| `split_phase_unverified` | 分阶段配置下至少一个阶段样本不足（仅分阶段配置提供） |
+| `split_phase_reassigned` | 分阶段配置下存在跨阶段重复分配的 unit（仅分阶段配置提供） |
 | `no_duplicate_exposure` / `duplicate_exposure` | 无重复曝光 / 有重复曝光 |
 | `no_mutex_conflict` / `mutex_conflict` | 无互斥冲突 / 有互斥冲突 |
 | `data_quality_ok` | 数据一致性检查为 pass |
@@ -568,6 +611,8 @@ pytest -q
 - 统计函数与已知参考值：正态分位数、比例检验、Welch t、卡方、t 分位数。
 - YAML/CSV 契约失败路径、非法 unit_id、非法比例值、路径逃逸。
 - 完整 fixture 审计、分流失衡、重复曝光、互斥冲突、未分配观测、负向主指标。
+- 分阶段 rollout：schedule 分区契约、边界归段、正反偏差不可抵消、小样本
+  `unverified/warn`、跨阶段重复 unit、CSV 行序无关、静态配置输出不变。
 - 规则优先级、fallback、`all/any/none`、引用 flag 检查。
 - 四种产物的完整性、HTML 自包含、行数约束、Markdown 内容。
 - SQLite 写入、幂等、列表/筛选/读取。

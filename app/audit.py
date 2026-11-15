@@ -163,6 +163,12 @@ def run_audit(
         "mutex_conflict_units": mutex_details["conflict_units"],
         "observation_coverage": quality_details["observation_coverage"],
     }
+    if split_details.get("mode") == "phased":
+        counts["split_phases"] = len(split_details["phases"])
+        counts["cross_phase_duplicate_units"] = split_details[
+            "cross_phase_duplicate_units"
+        ]
+        counts["split_worst_phase"] = split_details["worst_phase"]
     return {
         "schema_version": 1,
         "run": {

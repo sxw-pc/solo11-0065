@@ -9,9 +9,9 @@ from typing import Any
 
 import yaml
 
-from .models import (DecisionCard, DecisionRule, DecisionSpec, ExperimentConfig,
-                     ExposureSpec, MetricSpec, MutualExclusion, SplitSpec,
-                     StratificationSpec, Variant)
+from .models import (AllocationPhase, DecisionCard, DecisionRule, DecisionSpec,
+                     ExperimentConfig, ExposureSpec, MetricSpec, MutualExclusion,
+                     SplitSpec, StratificationSpec, Variant)
 
 SCHEMA_VERSION = 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
@@ -164,6 +164,133 @@ def _decision(raw: Any) -> DecisionSpec:
     return DecisionSpec(tuple(rules), cards, fallback)
 
 
+def _expected_proportions(
+    raw: Any, path: str, variant_keys: set[str]
+) -> dict[str, float]:
+    data = _mapping(raw, path)
+    expected = {
+        key: _number(value, f"{path}.{key}", low=0.0, high=1.0)
+        for key, value in data.items()
+    }
+    if set(expected) != variant_keys:
+        raise ConfigError(f"{path} 必须覆盖全部变体")
+    if abs(sum(expected.values()) - 1.0) > 1e-6:
+        raise ConfigError(f"{path} 之和必须为 1")
+    return expected
+
+
+def _boundary(phase: dict[str, Any], path: str, names: tuple[str, ...]) -> Any:
+    present = [name for name in names if name in phase]
+    if not present:
+        raise ConfigError(f"{path}.{names[0]} 缺失")
+    if len(present) > 1:
+        raise ConfigError(f"{path} 不能同时声明 {' / '.join(names)}")
+    return phase[present[0]]
+
+
+def _allocation_phase(
+    raw: Any,
+    path: str,
+    index: int,
+    variant_keys: set[str],
+) -> AllocationPhase:
+    data = _mapping(raw, path)
+    key_raw = data.get("key", data.get("id", data.get("name")))
+    key = (
+        _text(key_raw, f"{path}.key", slug=True)
+        if key_raw is not None
+        else f"phase-{index}"
+    )
+    start = _timestamp(_boundary(data, path, ("start", "phase_start")), f"{path}.start")
+    end = _timestamp(_boundary(data, path, ("end", "phase_end")), f"{path}.end")
+    if end <= start:
+        raise ConfigError(f"{path}.end 必须晚于 start")
+    expected = _expected_proportions(
+        _required(data, "expected", path), f"{path}.expected", variant_keys
+    )
+    min_raw = data.get("min_assignments", data.get("minimum_assignments"))
+    if min_raw is None:
+        raise ConfigError(f"{path}.min_assignments 缺失")
+    return AllocationPhase(
+        key=key,
+        start=start,
+        end=end,
+        expected=expected,
+        min_assignments=_integer(min_raw, f"{path}.min_assignments", low=2),
+    )
+
+
+def _allocation_phases(
+    raw: Any, experiment_start: datetime, experiment_end: datetime,
+    variant_keys: set[str],
+) -> tuple[AllocationPhase, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("split.phases 必须是非空列表")
+    phases: list[AllocationPhase] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw, start=1):
+        path = f"split.phases[{index - 1}]"
+        phase = _allocation_phase(item, path, index, variant_keys)
+        if phase.key in seen:
+            raise ConfigError(f"{path}.key 重复")
+        seen.add(phase.key)
+        if phases:
+            previous = phases[-1]
+            if phase.start < previous.end:
+                raise ConfigError(
+                    f"{path} 与前一阶段重叠；边界必须按 UTC 半开区间紧密相接"
+                )
+            if phase.start > previous.end:
+                raise ConfigError(
+                    f"{path} 与前一阶段之间存在空档；相邻阶段不得留缝"
+                )
+        if phase.start < experiment_start or phase.end > experiment_end:
+            raise ConfigError(
+                f"{path} 的边界必须落在 experiment.start 与 experiment.end 之内"
+            )
+        phases.append(phase)
+    if phases[0].start != experiment_start:
+        raise ConfigError("split.phases 必须从 experiment.start 开始，不能留空档")
+    if phases[-1].end != experiment_end:
+        raise ConfigError("split.phases 必须覆盖到 experiment.end，不能留空档")
+    return tuple(phases)
+
+
+def _split(
+    split_raw: dict[str, Any], experiment_start: datetime, experiment_end: datetime,
+    variants: list[Variant],
+) -> SplitSpec:
+    variant_keys = {item.key for item in variants}
+    phases_raw = split_raw.get("phases")
+    phases: tuple[AllocationPhase, ...] = ()
+    if phases_raw is not None:
+        phases = _allocation_phases(
+            phases_raw, experiment_start, experiment_end, variant_keys
+        )
+    expected_raw = split_raw.get("expected")
+    if expected_raw is None:
+        if not phases:
+            raise ConfigError("split.expected 缺失")
+        # 分阶段配置以第一段比例作为兼容摘要；逐段核验只使用 phases。
+        expected = dict(phases[0].expected)
+    else:
+        expected = _expected_proportions(expected_raw, "split.expected", variant_keys)
+    min_raw = split_raw.get("min_assignments")
+    if min_raw is None:
+        if not phases:
+            raise ConfigError("split.min_assignments 缺失")
+        min_assignments = sum(phase.min_assignments for phase in phases)
+    else:
+        min_assignments = _integer(min_raw, "split.min_assignments", low=2)
+    return SplitSpec(
+        expected=expected,
+        tolerance=_number(_required(split_raw, "tolerance", "split"),
+                          "split.tolerance", low=0.0, high=0.5),
+        min_assignments=min_assignments,
+        phases=phases,
+    )
+
+
 def load_config(path: Path) -> ExperimentConfig:
     """读取并校验 YAML。任何未知或不完整字段都会被明确拒绝。"""
     try:
@@ -192,22 +319,7 @@ def load_config(path: Path) -> ExperimentConfig:
     if control not in {item.key for item in variants}:
         raise ConfigError("control 必须引用已声明变体")
     split_raw = _mapping(_required(root, "split", "root"), "split")
-    expected_raw = _mapping(_required(split_raw, "expected", "split"), "split.expected")
-    expected = {
-        key: _number(value, f"split.expected.{key}", low=0.0, high=1.0)
-        for key, value in expected_raw.items()
-    }
-    if set(expected) != {item.key for item in variants}:
-        raise ConfigError("split.expected 必须覆盖全部变体")
-    if abs(sum(expected.values()) - 1.0) > 1e-6:
-        raise ConfigError("split.expected 之和必须为 1")
-    split = SplitSpec(
-        expected=expected,
-        tolerance=_number(_required(split_raw, "tolerance", "split"),
-                          "split.tolerance", low=0.0, high=0.5),
-        min_assignments=_integer(_required(split_raw, "min_assignments", "split"),
-                                 "split.min_assignments", low=2),
-    )
+    split = _split(split_raw, start, end, variants)
     exposure_raw = _mapping(_required(root, "exposure", "root"), "exposure")
     exposure = ExposureSpec(
         max_per_unit=_integer(_required(exposure_raw, "max_per_unit", "exposure"),

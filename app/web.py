@@ -9,8 +9,8 @@ from typing import Any
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
 from . import ledger
-from .models import CHECK_LABELS, DECISION_LABELS, SEVERITY_LABELS
-from .reporting import ARTIFACTS, fmt_num, fmt_p, fmt_pct
+from .models import CHECK_LABELS, DECISION_LABELS, PHASE_STATUS_LABELS, SEVERITY_LABELS
+from .reporting import ARTIFACTS, fmt_num, fmt_p, fmt_pct, split_phase_payload
 from .safety import PathSecurityError, resolve_under
 
 ALLOWED_DECISIONS = set(DECISION_LABELS)
@@ -63,6 +63,7 @@ def create_app(
             "DECISION_LABELS": DECISION_LABELS,
             "SEVERITY_LABELS": SEVERITY_LABELS,
             "CHECK_LABELS": CHECK_LABELS,
+            "PHASE_STATUS_LABELS": PHASE_STATUS_LABELS,
         }
 
     @app.get("/")
@@ -101,7 +102,9 @@ def create_app(
             )
         except (PathSecurityError, OSError) as exc:
             abort(404, description=f"审计产物不可读取：{exc}")
-        return render_template("run.html", row=row, result=_load_audit(artifact_path))
+        payload = _load_audit(artifact_path)
+        return render_template("run.html", row=row, result=payload,
+                               split_phases=split_phase_payload(payload))
 
     @app.get("/runs/<run_id>/artifacts/<name>")
     def artifact(run_id: str, name: str) -> Any:

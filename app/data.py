@@ -94,13 +94,20 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
                     f"{path.name}:{index} 分层字段 {field} 必须是安全短标签"
                 )
             strata[field] = value
+        assigned_at = _parse_time(row["assigned_at"], path.name, index)
+        phase_key = (
+            config.split.phase_key_at(assigned_at)
+            if config.split.phased and experiment_id == config.experiment_id
+            else None
+        )
         assignments.append(
             Assignment(
                 unit_id=unit_id,
                 experiment_id=experiment_id,
                 variant=variant,
-                assigned_at=_parse_time(row["assigned_at"], path.name, index),
+                assigned_at=assigned_at,
                 strata=strata,
+                phase_key=phase_key,
             )
         )
     return assignments

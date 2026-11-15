@@ -10,7 +10,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .models import CHECK_LABELS, DECISION_LABELS, SEVERITY_LABELS
+from .models import CHECK_LABELS, DECISION_LABELS, PHASE_STATUS_LABELS, SEVERITY_LABELS
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 ARTIFACTS = ("audit.json", "decision_card.json", "report.md", "report.html")
@@ -52,7 +52,7 @@ def _environment() -> Environment:
 
 def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
     primary = result["metrics"]["primary"]
-    return {
+    payload = {
         "run_id": result["run"]["run_id"],
         "generated_at": result["run"]["generated_at"],
         "experiment": result["experiment"]["experiment"],
@@ -67,6 +67,22 @@ def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
         "findings": result["findings"],
         "input_digest": result["run"]["input_digest"],
     }
+    phases = split_phase_payload(result)
+    if phases:
+        payload["split_phases"] = phases
+    return payload
+
+
+def split_phase_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    """若启用了分阶段分配，返回阶段级证据（供 Markdown/HTML/Web 渲染）。"""
+    split = next(
+        (check for check in result.get("checks", [])
+         if check.get("code") == "split.balance"),
+        None,
+    )
+    if not split or split.get("details", {}).get("mode") != "phased":
+        return None
+    return split["details"]
 
 
 def render_markdown(result: dict[str, Any]) -> str:
@@ -114,6 +130,45 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"| {check['label']} | {CHECK_LABELS.get(check['status'], check['status'])} "
             f"| {check['summary']} |"
         )
+    phases = split_phase_payload(result)
+    if phases:
+        lines.extend(["", "## 分阶段流量计划", ""])
+        lines.append(
+            "按 `assigned_at` 的 UTC 半开区间逐段核验声明比例；"
+            "整体分流结论由最差阶段决定。"
+        )
+        lines.append("")
+        lines.append(
+            "| 阶段 | 窗口（UTC） | 实际 counts | 实际比例 | 期望比例 | 最大偏差 | "
+            "p 值 | 样本 | 状态 |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |")
+        for phase in phases["phases"]:
+            expected = " / ".join(
+                f"{key}={value:.0%}" for key, value in phase["expected"].items()
+            )
+            shares = " / ".join(
+                f"{key}={value:.1%}" for key, value in phase["shares"].items()
+            )
+            counts = " / ".join(
+                f"{key}={value}" for key, value in phase["counts"].items()
+            )
+            max_deviation = phase["max_deviation"]
+            sample = f"{phase['total']}/{phase['min_assignments']}"
+            lines.append(
+                f"| {phase['key']} | {phase['start']} → {phase['end']} | {counts} "
+                f"| {shares} | {expected} | {max_deviation:.2%} "
+                f"| {fmt_p(phase['p_value'])} | {sample} "
+                f"| {PHASE_STATUS_LABELS.get(phase['status'], phase['status'])} |"
+            )
+        lines.append("")
+        lines.append(f"- 最差阶段：`{phases['worst_phase']}`")
+        lines.append(
+            f"- 跨阶段重复 unit：{phases['cross_phase_duplicate_units']} 个"
+        )
+        lines.append(
+            f"- 不在任何阶段的 unit：{phases['outside_schedule_units']} 个"
+        )
     lines.extend(["", "## Findings", ""])
     if not result["findings"]:
         lines.append("未发现需要关注的问题。")
@@ -160,7 +215,9 @@ def render_html(result: dict[str, Any]) -> str:
         generated_label=datetime.fromisoformat(result["run"]["generated_at"]).strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
+        split_phases=split_phase_payload(result),
         CHECK_LABELS=CHECK_LABELS,
+        PHASE_STATUS_LABELS=PHASE_STATUS_LABELS,
         SEVERITY_LABELS=SEVERITY_LABELS,
     )
     return _compact_html(rendered)

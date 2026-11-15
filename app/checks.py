@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Iterable
 from .models import Assignment, Check, ExperimentConfig, Finding, Observation
 from .stats import chi_square_gof
+
+
+PHASE_STATUS_ORDER = {"pass": 0, "unverified": 1, "warn": 2, "fail": 3}
+WORST_PHASE_STATUS = {0: "pass", 1: "warn", 2: "warn", 3: "fail"}
 
 
 def _primary_assignments(
@@ -20,10 +24,322 @@ def _primary_observations(
     return [row for row in observations if row.experiment_id == config.experiment_id]
 
 
+def assignment_phase_key(config: ExperimentConfig, row: Assignment) -> str | None:
+    """按 assigned_at 的 UTC 半开区间归段；与 data 层共用同一映射函数。
+
+    即使调用方构造的 Assignment 没有 phase_key，也会得到确定结果；
+    反之，预计算的 phase_key 与时间不一致时以时间为准，避免各层口径分叉。
+    """
+    return config.split.phase_key_at(row.assigned_at)
+
+
+def _phase_counts(
+    config: ExperimentConfig, rows: list[Assignment]
+) -> tuple[dict[str, dict[str, int]], list[str], list[str]]:
+    """按阶段汇总唯一 unit，CSV 行序与重复行不影响结果。
+
+    返回 (阶段 counts, 跨阶段重复 unit 的样本, 调度窗口外 unit)。
+    跨阶段重复 unit 从全部阶段计数中剔除，另行报告，避免同一 unit
+    因 CSV 行序被计入两个阶段或让阶段检查伪装通过。
+    """
+    by_unit: dict[str, list[Assignment]] = defaultdict(list)
+    for row in rows:
+        by_unit[row.unit_id].append(row)
+    phase_keys = [phase.key for phase in config.split.phases]
+    valid_phases = set(phase_keys)
+    chosen_by_phase: dict[str, list[Assignment]] = {key: [] for key in phase_keys}
+    conflicted: list[str] = []
+    outside: list[str] = []
+    for unit_id in sorted(by_unit):
+        unit_rows = by_unit[unit_id]
+        mapped_keys = {
+            assignment_phase_key(config, row) for row in unit_rows
+        } & valid_phases
+        if not mapped_keys:
+            outside.append(unit_id)
+            continue
+        if len(mapped_keys) > 1:
+            conflicted.append(unit_id)
+            continue
+        phase_key = next(iter(mapped_keys))
+        # 同阶段多条分配只计一次；同 variant 重复交由 exposure 检查。
+        # 同阶段不同 variant 属于契约冲突，按 (assigned_at, variant) 稳定取首条。
+        chosen = min(
+            (row for row in unit_rows if assignment_phase_key(config, row) == phase_key),
+            key=lambda row: (row.assigned_at, row.variant),
+        )
+        chosen_by_phase[phase_key].append(chosen)
+    counts: dict[str, dict[str, int]] = {}
+    for phase_key in phase_keys:
+        tallies = {variant.key: 0 for variant in config.variants}
+        for chosen in chosen_by_phase[phase_key]:
+            tallies[chosen.variant] = tallies.get(chosen.variant, 0) + 1
+        counts[phase_key] = tallies
+    return counts, conflicted, outside
+
+
+def _phase_chi(
+    counts: dict[str, int], expected: dict[str, float], total: int
+) -> tuple[dict[str, object], float]:
+    """阶段内卡方；零期望变体单独处理，允许 100/0 这类 ramp 起点。"""
+    if total <= 0:
+        return (
+            {
+                "chi_square": 0.0,
+                "degrees_of_freedom": max(1, len(expected) - 1),
+                "p_value": 1.0,
+                "residuals": {},
+                "total": 0,
+            },
+            1.0,
+        )
+    violations = [
+        key for key, probability in expected.items()
+        if probability <= 0.0 and counts.get(key, 0) > 0
+    ]
+    positive = {key: probability for key, probability in expected.items()
+                if probability > 0.0}
+    if violations:
+        # 声明为 0 的变体出现了真实流量：期望频数为 0，卡方统计量无定义；
+        # 以 p=0 与显式违规列表表达确定性的失衡。
+        return (
+            {
+                "chi_square": None,
+                "degrees_of_freedom": max(1, len(expected) - 1),
+                "p_value": 0.0,
+                "residuals": {key: 0.0 for key in positive},
+                "zero_expected_violations": sorted(violations),
+                "total": total,
+            },
+            0.0,
+        )
+    if len(positive) <= 1:
+        return (
+            {
+                "chi_square": 0.0,
+                "degrees_of_freedom": 1,
+                "p_value": 1.0,
+                "residuals": {key: 0.0 for key in positive},
+                "total": total,
+            },
+            1.0,
+        )
+    chi = chi_square_gof(
+        {key: counts.get(key, 0) for key in positive}, positive
+    )
+    return chi, float(chi["p_value"])
+
+
+def _assess_phased_split(
+    config: ExperimentConfig, rows: list[Assignment]
+) -> tuple[Check, dict[str, object], list[Finding]]:
+    """逐阶段核验声明流量计划；最差阶段状态决定整体 split flag。"""
+    counts_by_phase, conflicted, outside = _phase_counts(config, rows)
+    tolerance = config.split.tolerance
+    phase_payloads: list[dict[str, object]] = []
+    findings: list[Finding] = []
+    samples: list[dict[str, object]] = []
+    overall_rank = 0
+    worst_phase: str | None = None
+    for phase in config.split.phases:
+        counts = counts_by_phase[phase.key]
+        total = sum(counts.values())
+        shares = {
+            key: (counts[key] / total if total else 0.0) for key in counts
+        }
+        deviations = {
+            key: abs(shares[key] - phase.expected[key]) for key in counts
+        }
+        chi, p_value = _phase_chi(counts, phase.expected, total)
+        tolerance_breach = any(
+            deviations[key] > tolerance + 1e-12 for key in counts
+        ) or bool(chi.get("zero_expected_violations"))
+        sample_ok = total >= phase.min_assignments
+        if not sample_ok:
+            status = "unverified"
+        elif tolerance_breach:
+            status = "fail"
+        elif p_value < 0.05:
+            status = "warn"
+        else:
+            status = "pass"
+        rank = PHASE_STATUS_ORDER[status]
+        if rank > overall_rank:
+            overall_rank = rank
+            worst_phase = phase.key
+        payload = {
+            "key": phase.key,
+            "start": phase.start.isoformat(),
+            "end": phase.end.isoformat(),
+            "expected": phase.expected,
+            "min_assignments": phase.min_assignments,
+            "counts": counts,
+            "shares": {key: round(value, 8) for key, value in shares.items()},
+            "deviations": {
+                key: round(value, 8) for key, value in deviations.items()
+            },
+            "max_deviation": round(max(deviations.values(), default=0.0), 8),
+            "tolerance": tolerance,
+            "sample_ok": sample_ok,
+            "tolerance_breach": tolerance_breach,
+            "low_sample": not sample_ok,
+            "total": total,
+            "status": status,
+            "chi_square": (
+                None if chi["chi_square"] is None
+                else round(float(chi["chi_square"]), 8)
+            ),
+            "zero_expected_violations": list(
+                chi.get("zero_expected_violations", [])
+            ),
+            "degrees_of_freedom": int(chi["degrees_of_freedom"]),
+            "p_value": round(p_value, 10),
+            "residuals": {
+                key: round(float(value), 8)
+                for key, value in dict(chi["residuals"]).items()
+            },
+            "reason": _phase_reason(status, total, phase.min_assignments,
+                                    tolerance_breach, p_value),
+        }
+        phase_payloads.append(payload)
+        if status == "fail":
+            findings.append(
+                Finding(
+                    code="split.phase_imbalance",
+                    severity="high",
+                    category="split",
+                    title=f"阶段分流比例失衡：{phase.key}",
+                    detail=(
+                        f"阶段 {phase.key}（{phase.start.isoformat()} → "
+                        f"{phase.end.isoformat()}）的唯一 unit {total} 个；"
+                        f"实际比例偏离该阶段声明的分配计划超过容差 "
+                        f"{tolerance:.2%}。汇总口径可能相互抵消，必须按阶段修复。"
+                    ),
+                    evidence=payload,
+                )
+            )
+        elif status == "warn":
+            findings.append(
+                Finding(
+                    code="split.phase_imbalance",
+                    severity="medium",
+                    category="split",
+                    title=f"阶段分流比例提示异常：{phase.key}",
+                    detail=(
+                        f"阶段 {phase.key} 的比例偏差未超过容差，但卡方 "
+                        f"p={p_value:.4f} 低于 0.05，需结合分桶实现复核。"
+                    ),
+                    evidence=payload,
+                )
+            )
+        elif status == "unverified":
+            findings.append(
+                Finding(
+                    code="split.phase_insufficient",
+                    severity="medium",
+                    category="split",
+                    title=f"阶段样本不足，无法核验：{phase.key}",
+                    detail=(
+                        f"阶段 {phase.key} 只有 {total} 个唯一 unit，低于该阶段 "
+                        f"最低可检验样本数 {phase.min_assignments}；"
+                        "本阶段结论为未验证，不据此判定真实失衡。"
+                    ),
+                    evidence=payload,
+                )
+            )
+    if conflicted:
+        overall_rank = PHASE_STATUS_ORDER["fail"]
+        if worst_phase is None:
+            worst_phase = "cross-phase-duplicate"
+        samples = _conflict_samples(config, rows, conflicted)
+        findings.append(
+            Finding(
+                code="split.phase_reassignment",
+                severity="high",
+                category="split",
+                title="unit 跨阶段重复分配",
+                detail=(
+                    f"{len(conflicted)} 个 unit 的分配时间落在多个流量阶段；"
+                    "这些 unit 已从所有阶段计数中剔除，阶段比例检查不能据此通过。"
+                ),
+                evidence={
+                    "count": len(conflicted),
+                    "sample_units": conflicted[:20],
+                    "samples": samples[:20],
+                },
+            )
+        )
+    status = WORST_PHASE_STATUS[overall_rank]
+    phase_summary = "；".join(
+        f"{item['key']} {item['status']}"
+        for item in phase_payloads
+    )
+    summary = (
+        f"{len(phase_payloads)} 个流量阶段逐段核验（{phase_summary}），"
+        f"跨阶段重复 unit {len(conflicted)} 个"
+    )
+    details: dict[str, object] = {
+        "mode": "phased",
+        "phases": phase_payloads,
+        "tolerance": tolerance,
+        "worst_phase": worst_phase,
+        "cross_phase_duplicate_units": len(conflicted),
+        "cross_phase_duplicate_samples": samples,
+        "outside_schedule_units": len(outside),
+        "outside_schedule_samples": outside[:20],
+    }
+    check = Check("split.balance", "分流比例", status, summary, details)
+    return check, details, findings
+
+
+def _phase_reason(
+    status: str, total: int, minimum: int, tolerance_breach: bool, p_value: float
+) -> str:
+    if status == "unverified":
+        return f"唯一 unit {total} < 最低样本 {minimum}，结果未验证"
+    if status == "fail":
+        return "比例偏差超过阶段容差"
+    if status == "warn":
+        return f"卡方 p={p_value:.4f} < 0.05"
+    return "比例偏差在容差内且卡方未提示异常"
+
+
+def _conflict_samples(
+    config: ExperimentConfig, rows: list[Assignment], conflicted: list[str]
+) -> list[dict[str, object]]:
+    wanted = set(conflicted)
+    grouped: dict[str, list[Assignment]] = defaultdict(list)
+    for row in rows:
+        if row.unit_id in wanted:
+            grouped[row.unit_id].append(row)
+    samples: list[dict[str, object]] = []
+    for unit_id in sorted(grouped):
+        entries = sorted(
+            grouped[unit_id],
+            key=lambda row: (row.assigned_at, row.variant),
+        )
+        samples.append(
+            {
+                "unit_id": unit_id,
+                "assignments": [
+                    {
+                        "variant": row.variant,
+                        "assigned_at": row.assigned_at.isoformat(),
+                        "phase": assignment_phase_key(config, row),
+                    }
+                    for row in entries
+                ],
+            }
+        )
+    return samples
+
+
 def assess_split(
     config: ExperimentConfig, assignments: list[Assignment]
 ) -> tuple[Check, dict[str, object], list[Finding]]:
     rows = _primary_assignments(config, assignments)
+    if config.split.phased:
+        return _assess_phased_split(config, rows)
     by_unit: dict[str, Assignment] = {}
     for row in rows:
         by_unit.setdefault(row.unit_id, row)

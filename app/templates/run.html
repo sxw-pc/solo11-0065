@@ -97,12 +97,41 @@
   </section>
 </div>
 
+{% if split_phases %}
+<section>
+  <div class="section-head">
+    <h2>分阶段流量计划</h2>
+    <p class="muted">按 <code>assigned_at</code> 的 UTC 半开区间逐段核验声明比例；整体分流结论由最差阶段决定。</p>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>阶段</th><th>窗口（UTC）</th><th class="num">实际 counts</th><th class="num">实际比例</th><th class="num">期望比例</th><th class="num">最大偏差</th><th class="num">p</th><th class="num">样本 / 最低</th><th>状态</th></tr></thead>
+      <tbody>
+        {% for phase in split_phases.phases %}
+        <tr>
+          <td><strong>{{ phase.key }}</strong></td>
+          <td class="mono-sub">{{ phase.start }}<br>{{ phase.end }}</td>
+          <td class="num">{% for key, value in phase.counts.items() %}{{ key }}={{ value }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td class="num">{% for key, value in phase.shares.items() %}{{ key }}={{ value|pct(1) }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td class="num">{% for key, value in phase.expected.items() %}{{ key }}={{ value|pct(0) }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td class="num">{{ phase.max_deviation|pct(2) }}</td>
+          <td class="num">{{ phase.p_value|pval }}</td>
+          <td class="num">{{ phase.total }} / {{ phase.min_assignments }}</td>
+          <td><span class="status {{ 'warn' if phase.status == 'unverified' else phase.status }}">{{ PHASE_STATUS_LABELS.get(phase.status, phase.status) }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">最差阶段 <strong>{{ split_phases.worst_phase }}</strong> · 跨阶段重复 unit {{ split_phases.cross_phase_duplicate_units }} 个 · 不在任何阶段的 unit {{ split_phases.outside_schedule_units }} 个</p>
+</section>
+{% endif %}
+
 <section>
   <div class="section-head">
     <h2>Findings</h2>
     <p class="muted">按严重度排序的结构化发现。</p>
-  </div>
-  {% if result.findings %}
+  </div>  {% if result.findings %}
   <div class="finding-grid">
     {% for finding in result.findings %}
     <article class="finding-card">

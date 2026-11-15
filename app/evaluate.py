@@ -142,6 +142,21 @@ def metrics_payload(primary: Any, secondary: list[Any], guardrails: list[Any]) -
 
 
 def config_payload(config: ExperimentConfig) -> dict[str, Any]:
+    split_payload: dict[str, Any] = {
+        "expected": config.split.expected, "tolerance": config.split.tolerance,
+        "min_assignments": config.split.min_assignments,
+    }
+    if config.split.phased:
+        split_payload["phases"] = [
+            {
+                "key": phase.key,
+                "start": phase.start.isoformat(),
+                "end": phase.end.isoformat(),
+                "expected": phase.expected,
+                "min_assignments": phase.min_assignments,
+            }
+            for phase in config.split.phases
+        ]
     return {
         "schema_version": config.schema_version,
         "experiment": {
@@ -151,10 +166,7 @@ def config_payload(config: ExperimentConfig) -> dict[str, Any]:
         },
         "control": config.control,
         "variants": [asdict(variant) for variant in config.variants],
-        "split": {
-            "expected": config.split.expected, "tolerance": config.split.tolerance,
-            "min_assignments": config.split.min_assignments,
-        },
+        "split": split_payload,
         "exposure": asdict(config.exposure),
         "mutual_exclusions": [asdict(item) for item in config.mutexes],
         "metrics": {
@@ -190,7 +202,7 @@ def build_flags(
 ) -> dict[str, bool]:
     guardrail_breach = any(item.guardrail_status == "breach" for item in guardrails)
     guardrail_watch = any(item.guardrail_status == "watch" for item in guardrails)
-    return {
+    flags = {
         "split_balanced": split.status == "pass",
         "split_imbalanced": split.status != "pass",
         "duplicate_exposure": exposure.status != "pass",
@@ -217,3 +229,17 @@ def build_flags(
         "guardrail_watch": guardrail_watch,
         "no_guardrail_watch": not guardrail_watch,
     }
+    details = getattr(split, "details", {}) or {}
+    if details.get("mode") == "phased":
+        phases = details.get("phases", [])
+        # 阶段级 flag：策略/规则可以显式区分“某段真实失衡”与“某段样本不足”。
+        flags["split_phase_failed"] = any(
+            phase.get("status") == "fail" for phase in phases
+        )
+        flags["split_phase_unverified"] = any(
+            phase.get("status") == "unverified" for phase in phases
+        )
+        flags["split_phase_reassigned"] = (
+            details.get("cross_phase_duplicate_units", 0) > 0
+        )
+    return flags
