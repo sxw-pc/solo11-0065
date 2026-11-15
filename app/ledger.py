@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS runs (
     decision_reason TEXT NOT NULL,
     headline TEXT NOT NULL,
     primary_metric_key TEXT NOT NULL,
-    primary_effect REAL NOT NULL,
-    primary_p_value REAL NOT NULL,
+    primary_effect REAL,
+    primary_p_value REAL,
     finding_count INTEGER NOT NULL,
     input_digest TEXT NOT NULL,
     config_digest TEXT NOT NULL,
@@ -56,15 +56,25 @@ CREATE TABLE IF NOT EXISTS metrics (
     role TEXT NOT NULL,
     metric_key TEXT NOT NULL,
     label TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'mean',
+    estimable INTEGER NOT NULL DEFAULT 1,
     control_n INTEGER NOT NULL,
     treatment_n INTEGER NOT NULL,
-    control_value REAL NOT NULL,
-    treatment_value REAL NOT NULL,
-    absolute_effect REAL NOT NULL,
-    p_value REAL NOT NULL,
+    control_value REAL,
+    treatment_value REAL,
+    absolute_effect REAL,
+    p_value REAL,
     significant INTEGER NOT NULL,
     favorable INTEGER NOT NULL,
     guardrail_status TEXT NOT NULL,
+    control_numerator_sum REAL NOT NULL DEFAULT 0,
+    control_denominator_sum REAL NOT NULL DEFAULT 0,
+    treatment_numerator_sum REAL NOT NULL DEFAULT 0,
+    treatment_denominator_sum REAL NOT NULL DEFAULT 0,
+    control_zero_denominator_units INTEGER NOT NULL DEFAULT 0,
+    treatment_zero_denominator_units INTEGER NOT NULL DEFAULT 0,
+    control_effective_units INTEGER NOT NULL DEFAULT 0,
+    treatment_effective_units INTEGER NOT NULL DEFAULT 0,
     details_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS strata (
@@ -74,8 +84,8 @@ CREATE TABLE IF NOT EXISTS strata (
     value TEXT NOT NULL,
     control_n INTEGER NOT NULL,
     treatment_n INTEGER NOT NULL,
-    absolute_effect REAL NOT NULL,
-    p_value REAL NOT NULL,
+    absolute_effect REAL,
+    p_value REAL,
     eligible INTEGER NOT NULL,
     reversal INTEGER NOT NULL,
     details_json TEXT NOT NULL
@@ -85,6 +95,35 @@ CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id, severity);
 CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_strata_run ON strata(run_id);
 """
+
+# 旧版 metrics 表没有 ratio/可估计性字段，且关键列为 NOT NULL；
+# 检测到旧结构时整表重建（台账数据可由 out/ 产物重新写入）。
+def _migrate_metrics_table(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(metrics)").fetchall()
+    }
+    if not columns or "estimable" in columns:
+        return
+    connection.executescript(
+        """
+        ALTER TABLE metrics RENAME TO metrics_legacy;
+        """
+        + SCHEMA.split("CREATE TABLE IF NOT EXISTS strata")[0]
+        .replace("CREATE TABLE IF NOT EXISTS metrics", "CREATE TABLE metrics")
+        + """
+        INSERT INTO metrics (
+            run_id, role, metric_key, label, kind, estimable, control_n,
+            treatment_n, control_value, treatment_value, absolute_effect,
+            p_value, significant, favorable, guardrail_status, details_json
+        )
+        SELECT run_id, role, metric_key, label, 'mean', 1, control_n,
+               treatment_n, control_value, treatment_value, absolute_effect,
+               p_value, significant, favorable, guardrail_status, details_json
+        FROM metrics_legacy;
+        DROP TABLE metrics_legacy;
+        """
+    )
 
 
 def _json(value: Any) -> str:
@@ -102,6 +141,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path) -> None:
     with closing(connect(db_path)) as connection:
         connection.executescript(SCHEMA)
+        _migrate_metrics_table(connection)
         connection.commit()
 
 
@@ -147,18 +187,33 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
              for item in result["findings"]],
         )
         metric_rows = [
-            (run_id, item["role"], item["key"], item["label"], item["control_n"],
-             item["treatment_n"], item["control_value"], item["treatment_value"],
-             item["absolute_effect"], item["p_value"], int(item["significant"]),
-             int(item["favorable"]), item["guardrail_status"], _json(item))
+            (run_id, item["role"], item["key"], item["label"],
+             item.get("kind", "mean"), int(item.get("estimable", True)),
+             item["control_n"], item["treatment_n"], item["control_value"],
+             item["treatment_value"], item["absolute_effect"], item["p_value"],
+             int(item["significant"]), int(item["favorable"]),
+             item["guardrail_status"],
+             item.get("control_numerator_sum", 0.0),
+             item.get("control_denominator_sum", 0.0),
+             item.get("treatment_numerator_sum", 0.0),
+             item.get("treatment_denominator_sum", 0.0),
+             item.get("control_zero_denominator_units", 0),
+             item.get("treatment_zero_denominator_units", 0),
+             item.get("control_effective_units", 0),
+             item.get("treatment_effective_units", 0),
+             _json(item))
             for item in [primary, *result["metrics"]["secondary"],
                          *result["metrics"]["guardrails"]]
         ]
         connection.executemany(
-            "INSERT INTO metrics (run_id, role, metric_key, label, control_n, "
-            "treatment_n, control_value, treatment_value, absolute_effect, p_value, "
-            "significant, favorable, guardrail_status, details_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO metrics (run_id, role, metric_key, label, kind, estimable, "
+            "control_n, treatment_n, control_value, treatment_value, absolute_effect, "
+            "p_value, significant, favorable, guardrail_status, "
+            "control_numerator_sum, control_denominator_sum, treatment_numerator_sum, "
+            "treatment_denominator_sum, control_zero_denominator_units, "
+            "treatment_zero_denominator_units, control_effective_units, "
+            "treatment_effective_units, details_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             metric_rows,
         )
         stratum_rows = []

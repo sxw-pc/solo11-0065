@@ -136,12 +136,12 @@
     <div class="tiles">
       <div class="tile">
         <div class="tile-label">主指标效应</div>
-        <div class="tile-value">{{ primary.absolute_effect|num }}</div>
+        <div class="tile-value">{{ primary.absolute_effect|num if primary.estimable else "不可估计" }}</div>
         <div class="tile-note">{{ primary.label }} · p={{ primary.p_value|pval }}</div>
       </div>
       <div class="tile">
         <div class="tile-label">95% 置信区间</div>
-        <div class="tile-value">{{ primary.ci_low|num(3) }} – {{ primary.ci_high|num(3) }}</div>
+        <div class="tile-value">{% if primary.estimable %}{{ primary.ci_low|num(3) }} – {{ primary.ci_high|num(3) }}{% else %}—{% endif %}</div>
         <div class="tile-note">显著：{{ "是" if primary.significant else "否" }}</div>
       </div>
       <div class="tile">
@@ -167,11 +167,13 @@
             <td>{{ metric.role }}</td>
             <td class="num">{{ metric.control_value|num(4) }}<br><span class="finding-code">n={{ metric.control_n }}</span></td>
             <td class="num">{{ metric.treatment_value|num(4) }}<br><span class="finding-code">n={{ metric.treatment_n }}</span></td>
-            <td class="num">{{ "%+.4f"|format(metric.absolute_effect) }}</td>
+            <td class="num">{% if metric.absolute_effect is not none %}{{ "%+.4f"|format(metric.absolute_effect) }}{% else %}—{% endif %}</td>
             <td class="num">{{ metric.p_value|pval }}</td>
             <td>
-              {% if metric.role == "guardrail" %}
-              <span class="badge {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
+              {% if not metric.estimable %}
+              <span class="badge warn">不可估计</span>
+              {% elif metric.role == "guardrail" %}
+              <span class="badge {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常", "not_estimable": "不可估计"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
               {% elif metric.significant %}
               <span class="badge {{ "pass" if metric.favorable else "fail" }}">{{ "正向显著" if metric.favorable else "负向显著" }}</span>
               {% else %}
@@ -227,7 +229,7 @@
             <td class="num">{{ group.treatment_n }}</td>
             <td class="num">{{ group.control_value|num(4) }}</td>
             <td class="num">{{ group.treatment_value|num(4) }}</td>
-            <td class="num">{{ "%+.4f"|format(group.absolute_effect) }}</td>
+            <td class="num">{% if group.absolute_effect is not none %}{{ "%+.4f"|format(group.absolute_effect) }}{% else %}—{% endif %}</td>
             <td class="num">{{ group.p_value|pval }}</td>
             <td>
               {% if group.reversal %}<span class="badge fail">方向反转</span>

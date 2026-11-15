@@ -34,17 +34,24 @@ class Variant:
 @dataclass(frozen=True)
 class MetricSpec:
     key: str
-    column: str
+    column: str | None
     label: str
-    kind: str  # proportion | mean
+    kind: str  # proportion | mean | ratio
     orientation: str  # higher_is_better | lower_is_better
     alpha: float = 0.05
     min_effect: float = 0.0
     max_degradation: float = 0.0
+    # 仅 kind == "ratio" 使用：同一 unit 内不可拆开的分子/分母样本对。
+    numerator_column: str | None = None
+    denominator_column: str | None = None
 
     @property
     def favorable_sign(self) -> int:
         return 1 if self.orientation == "higher_is_better" else -1
+
+    @property
+    def is_ratio(self) -> bool:
+        return self.kind == "ratio"
 
 
 @dataclass(frozen=True)
@@ -141,7 +148,10 @@ class Observation:
     experiment_id: str
     variant: str
     observed_at: datetime
-    values: dict[str, float]
+    values: dict[str, float] = field(default_factory=dict)
+    # ratio 指标的成对样本：metric key -> (numerator, denominator)，
+    # 两数来自同一行，统计时必须作为不可拆开的样本对使用。
+    pairs: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -174,22 +184,32 @@ class MetricResult:
     treatment_label: str
     control_n: int
     treatment_n: int
-    control_sum: float
-    treatment_sum: float
-    control_value: float
-    treatment_value: float
-    absolute_effect: float
+    control_sum: float | None
+    treatment_sum: float | None
+    control_value: float | None
+    treatment_value: float | None
+    absolute_effect: float | None
     relative_effect: float | None
-    ci_low: float
-    ci_high: float
-    p_value: float
+    ci_low: float | None
+    ci_high: float | None
+    p_value: float | None
     alpha: float
     significant: bool
     favorable: bool
     meets_threshold: bool
     guardrail_status: str
-    degradation: float
+    degradation: float | None
     max_degradation: float
+    # ratio 指标专属：pooled ratio（Σnumerator/Σdenominator）与配对 delta-method 信息。
+    estimable: bool = True
+    control_numerator_sum: float = 0.0
+    control_denominator_sum: float = 0.0
+    treatment_numerator_sum: float = 0.0
+    treatment_denominator_sum: float = 0.0
+    control_zero_denominator_units: int = 0
+    treatment_zero_denominator_units: int = 0
+    control_effective_units: int = 0
+    treatment_effective_units: int = 0
 
 
 @dataclass(frozen=True)
@@ -198,10 +218,10 @@ class StratumResult:
     value: str
     control_n: int
     treatment_n: int
-    control_value: float
-    treatment_value: float
-    absolute_effect: float
-    p_value: float
+    control_value: float | None
+    treatment_value: float | None
+    absolute_effect: float | None
+    p_value: float | None
     eligible: bool
     favorable: bool
     reversal: bool

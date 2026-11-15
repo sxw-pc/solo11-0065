@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any
 
-from .metrics import comparison
+from .metrics import comparison, ratio_comparison
 from .models import (
     Assignment,
     Check,
@@ -53,6 +54,74 @@ def assess_stratification(
         )
         groups: list[StratumResult] = []
         for value, rows in grouped.items():
+            if config.primary.is_ratio:
+                control_pairs = [
+                    row.pairs[config.primary.key] for row in rows
+                    if row.variant == config.control
+                ]
+                treatment_pairs = [
+                    row.pairs[config.primary.key] for row in rows
+                    if row.variant == treatment_key
+                ]
+                eligible = (
+                    len(control_pairs) >= config.stratification.min_group_size
+                    and len(treatment_pairs) >= config.stratification.min_group_size
+                )
+                if not eligible:
+                    stratum = StratumResult(
+                        field=field, value=value,
+                        control_n=len(control_pairs),
+                        treatment_n=len(treatment_pairs),
+                        control_value=None, treatment_value=None,
+                        absolute_effect=None, p_value=None,
+                        eligible=False, favorable=False, reversal=False,
+                    )
+                    groups.append(stratum)
+                    all_groups.append(stratum)
+                    continue
+                result: dict[str, Any] = ratio_comparison(
+                    control_pairs, treatment_pairs, config.stratification.alpha
+                )
+                if not result["estimable"]:
+                    stratum = StratumResult(
+                        field=field, value=value,
+                        control_n=len(control_pairs),
+                        treatment_n=len(treatment_pairs),
+                        control_value=None, treatment_value=None,
+                        absolute_effect=None, p_value=None,
+                        eligible=False, favorable=False, reversal=False,
+                    )
+                    groups.append(stratum)
+                    all_groups.append(stratum)
+                    continue
+                effect = float(result["absolute_effect"])
+                p_value = float(result["p_value"])
+                control_value = result["control_value"]
+                treatment_value = result["treatment_value"]
+                favorable = effect * config.primary.favorable_sign > 0.0
+                reversal = (
+                    primary.estimable
+                    and primary.absolute_effect is not None
+                    and abs(primary.absolute_effect) > 1e-12
+                    and effect * primary.absolute_effect < 0.0
+                    and p_value < config.stratification.alpha
+                )
+                stratum = StratumResult(
+                    field=field,
+                    value=value,
+                    control_n=len(control_pairs),
+                    treatment_n=len(treatment_pairs),
+                    control_value=round(float(control_value), 10),
+                    treatment_value=round(float(treatment_value), 10),
+                    absolute_effect=round(effect, 10),
+                    p_value=round(p_value, 10),
+                    eligible=True,
+                    favorable=favorable,
+                    reversal=reversal,
+                )
+                groups.append(stratum)
+                all_groups.append(stratum)
+                continue
             control_values = [
                 row.values[config.primary.key] for row in rows
                 if row.variant == config.control
@@ -116,7 +185,8 @@ def assess_stratification(
     favorable_share = favorable_count / len(eligible_groups) if eligible_groups else 0.0
     opposite = [
         group for group in eligible_groups
-        if not group.favorable and abs(group.absolute_effect) > 1e-12
+        if group.absolute_effect is not None
+        and not group.favorable and abs(group.absolute_effect) > 1e-12
     ]
     truncated_any = any(bool(field["truncated"]) for field in fields_payload)
     if reversal_groups:

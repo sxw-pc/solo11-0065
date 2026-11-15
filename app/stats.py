@@ -1,9 +1,9 @@
-"""仅使用标准库的统计推断：比例 z 检验、Welch t 检验与卡方拟合优度。"""
+"""仅使用标准库的统计推断：比例 z 检验、Welch t 检验、ratio delta-method 与卡方拟合优度。"""
 
 from __future__ import annotations
 
 import math
-from typing import Iterable
+from typing import Any, Iterable
 
 EPS = 3.0e-14
 FPMIN = 1.0e-300
@@ -236,6 +236,124 @@ def welch_t_test(
         "ci_high": difference + critical * standard_error,
         "p_value": p_value,
         "significant": p_value < alpha,
+    }
+
+
+def _ratio_arm_variance(
+    pairs: list[tuple[float, float]], numerator_sum: float, denominator_sum: float
+) -> tuple[float, int]:
+    """单臂 pooled ratio 的 delta-method 方差（除以 n）与零分母 unit 数。
+
+    ratio R = Σy / Σd 的估计量基于同 unit 内 (y, d) 的联合变化：
+    影响函数 residual_i = y_i - R * d_i，配对协方差天然保留在
+    Σ(y_i - R d_i)^2 中；分母列既不被当作样本量，两列也不拆成独立检验。
+    零分母 unit（契约要求其分子也为 0）对两个总和与残差平方都贡献 0，
+    但仍计入 n，只是不计入有效（分母为正）unit 数。
+    """
+    if denominator_sum <= 0.0:
+        raise ValueError("ratio 方差要求分母总和为正")
+    ratio = numerator_sum / denominator_sum
+    zero_units = 0
+    residual_ss = 0.0
+    for numerator, denominator in pairs:
+        if denominator == 0.0:
+            zero_units += 1
+            continue
+        residual = numerator - ratio * denominator
+        residual_ss += residual * residual
+    n_total = len(pairs)
+    if n_total < 1:
+        raise ValueError("ratio 检验需要非空样本")
+    # 1/denominator_sum^2 * (1/n) * Σ residual_i^2
+    variance = residual_ss / n_total / (denominator_sum ** 2)
+    return variance, zero_units
+
+
+def pooled_ratio_test(
+    control_pairs: Iterable[tuple[float, float]],
+    treatment_pairs: Iterable[tuple[float, float]],
+    alpha: float,
+) -> dict[str, Any]:
+    """Pooled ratio 检验：每臂 R = Σnumerator / Σdenominator。
+
+    效应为 treatment R - control R；p 值与置信区间使用同一个按 unit
+    配对的 delta-method 方差（影响函数法），保证 p 与 CI 推断口径一致。
+    任一臂总分母为 0 时返回 estimable=False，不伪造估计量、区间或显著性。
+    """
+    control_items = list(control_pairs)
+    treatment_items = list(treatment_pairs)
+    if not control_items or not treatment_items:
+        raise ValueError("ratio 检验每组至少需要 1 个观测")
+    control_num = sum(pair[0] for pair in control_items)
+    control_den = sum(pair[1] for pair in control_items)
+    treatment_num = sum(pair[0] for pair in treatment_items)
+    treatment_den = sum(pair[1] for pair in treatment_items)
+    if control_den <= 0.0 or treatment_den <= 0.0:
+        return {
+            "estimable": False,
+            "control_value": None,
+            "treatment_value": None,
+            "absolute_effect": None,
+            "ci_low": None,
+            "ci_high": None,
+            "p_value": None,
+            "significant": False,
+            "control_numerator_sum": control_num,
+            "control_denominator_sum": control_den,
+            "treatment_numerator_sum": treatment_num,
+            "treatment_denominator_sum": treatment_den,
+            "control_zero_denominator_units": sum(
+                1 for pair in control_items if pair[1] == 0.0
+            ),
+            "treatment_zero_denominator_units": sum(
+                1 for pair in treatment_items if pair[1] == 0.0
+            ),
+            "control_effective_units": sum(
+                1 for pair in control_items if pair[1] > 0.0
+            ),
+            "treatment_effective_units": sum(
+                1 for pair in treatment_items if pair[1] > 0.0
+            ),
+            "standard_error": None,
+        }
+    control_value = control_num / control_den
+    treatment_value = treatment_num / treatment_den
+    difference = treatment_value - control_value
+    control_var, control_zero = _ratio_arm_variance(
+        control_items, control_num, control_den
+    )
+    treatment_var, treatment_zero = _ratio_arm_variance(
+        treatment_items, treatment_num, treatment_den
+    )
+    variance = control_var + treatment_var
+    standard_error = math.sqrt(variance)
+    if standard_error == 0.0:
+        p_value = 1.0 if difference == 0.0 else 0.0
+        ci_low = ci_high = difference
+    else:
+        z_value = difference / standard_error
+        p_value = clamp(2.0 * normal_sf(abs(z_value)))
+        z_critical = normal_ppf(1.0 - alpha / 2.0)
+        ci_low = difference - z_critical * standard_error
+        ci_high = difference + z_critical * standard_error
+    return {
+        "estimable": True,
+        "control_value": control_value,
+        "treatment_value": treatment_value,
+        "absolute_effect": difference,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "p_value": p_value,
+        "significant": bool(p_value < alpha),
+        "control_numerator_sum": control_num,
+        "control_denominator_sum": control_den,
+        "treatment_numerator_sum": treatment_num,
+        "treatment_denominator_sum": treatment_den,
+        "control_zero_denominator_units": control_zero,
+        "treatment_zero_denominator_units": treatment_zero,
+        "control_effective_units": len(control_items) - control_zero,
+        "treatment_effective_units": len(treatment_items) - treatment_zero,
+        "standard_error": standard_error,
     }
 
 

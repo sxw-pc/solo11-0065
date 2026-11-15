@@ -41,6 +41,30 @@ def sample_check(
 def primary_check(
     primary: Any, robust: bool, favorable_share: float
 ) -> tuple[Check, list[Finding]]:
+    if not getattr(primary, "estimable", True):
+        status = "warn"
+        details = {
+            "absolute_effect": None,
+            "ci": None,
+            "p_value": None, "significant": False,
+            "favorable": False, "meets_threshold": False,
+            "robust": False, "favorable_share": favorable_share,
+            "estimable": False,
+        }
+        check = Check(
+            "metric.primary", "主指标效应", status,
+            f"{primary.label} 整臂总分母为 0，指标不可估计", details,
+        )
+        findings = [
+            Finding(
+                code="metric.not_estimable", severity="high", category="metric",
+                title="主指标不可估计",
+                detail="至少一个实验臂的分母总和为 0，pooled ratio 无法估计，"
+                       "不能记为 0 或伪造显著性。",
+                evidence=asdict(primary),
+            )
+        ]
+        return check, findings
     if primary.significant and not primary.favorable:
         status = "fail"
     elif robust:
@@ -53,6 +77,7 @@ def primary_check(
         "p_value": primary.p_value, "significant": primary.significant,
         "favorable": primary.favorable, "meets_threshold": primary.meets_threshold,
         "robust": robust, "favorable_share": favorable_share,
+        "estimable": True,
     }
     check = Check(
         "metric.primary", "主指标效应", status,
@@ -93,20 +118,33 @@ def primary_check(
 def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
     breaches = [item for item in guardrails if item.guardrail_status == "breach"]
     watches = [item for item in guardrails if item.guardrail_status == "watch"]
-    status = "fail" if breaches else ("warn" if watches else "pass")
+    not_estimable = [
+        item for item in guardrails if item.guardrail_status == "not_estimable"
+    ]
+    status = "fail" if breaches else (
+        "warn" if (watches or not_estimable) else "pass"
+    )
     details = {
         "metrics": [
             {"key": item.key, "label": item.label, "status": item.guardrail_status,
              "degradation": item.degradation,
-             "max_degradation": item.max_degradation, "p_value": item.p_value}
+             "max_degradation": item.max_degradation, "p_value": item.p_value,
+             "estimable": getattr(item, "estimable", True)}
             for item in guardrails
         ],
         "breaches": [item.key for item in breaches],
         "watches": [item.key for item in watches],
+        "not_estimable": [item.key for item in not_estimable],
     }
     check = Check(
         "guardrail.status", "护栏指标", status,
-        f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项", details,
+        (
+            f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项，"
+            f"不可估计 {len(not_estimable)} 项"
+        )
+        if not_estimable
+        else f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项",
+        details,
     )
     findings: list[Finding] = []
     for item in guardrails:
@@ -127,6 +165,16 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
                     category="guardrail", title=f"护栏指标接近阈值：{item.label}",
                     detail=f"劣化幅度 {item.degradation:.4%} 已达阈值 "
                            f"{item.max_degradation:.4%} 的一半以上。",
+                    evidence=asdict(item),
+                )
+            )
+        elif item.guardrail_status == "not_estimable":
+            findings.append(
+                Finding(
+                    code=f"guardrail.not_estimable.{item.key}", severity="medium",
+                    category="guardrail", title=f"护栏指标不可估计：{item.label}",
+                    detail="至少一个实验臂的分母总和为 0，无法计算护栏劣化，"
+                           "需人工复核低活动臂数据。",
                     evidence=asdict(item),
                 )
             )
@@ -160,10 +208,14 @@ def config_payload(config: ExperimentConfig) -> dict[str, Any]:
         "metrics": {
             "primary": {
                 "key": config.primary.key, "label": config.primary.label,
+                "kind": config.primary.kind,
+                "column": config.primary.column,
+                "numerator_column": config.primary.numerator_column,
+                "denominator_column": config.primary.denominator_column,
                 "min_effect": config.primary.min_effect, "alpha": config.primary.alpha,
             },
             "guardrails": [
-                {"key": item.key, "label": item.label,
+                {"key": item.key, "label": item.label, "kind": item.kind,
                  "max_degradation": item.max_degradation}
                 for item in config.guardrails
             ],
@@ -190,6 +242,10 @@ def build_flags(
 ) -> dict[str, bool]:
     guardrail_breach = any(item.guardrail_status == "breach" for item in guardrails)
     guardrail_watch = any(item.guardrail_status == "watch" for item in guardrails)
+    primary_estimable = bool(getattr(primary, "estimable", True))
+    guardrail_not_estimable = any(
+        getattr(item, "estimable", True) is False for item in guardrails
+    )
     return {
         "split_balanced": split.status == "pass",
         "split_imbalanced": split.status != "pass",
@@ -204,6 +260,8 @@ def build_flags(
         and quality.status != "fail",
         "sample_sufficient": sample.status == "pass",
         "sample_insufficient": sample.status != "pass",
+        "primary_estimable": primary_estimable,
+        "primary_not_estimable": not primary_estimable,
         "primary_positive_significant": primary.significant and primary.favorable,
         "primary_negative_significant": primary.significant and not primary.favorable,
         "primary_inconclusive": not primary.significant,
@@ -216,4 +274,6 @@ def build_flags(
         "no_guardrail_breach": not guardrail_breach,
         "guardrail_watch": guardrail_watch,
         "no_guardrail_watch": not guardrail_watch,
+        "guardrail_not_estimable": guardrail_not_estimable,
+        "guardrail_estimable": not guardrail_not_estimable,
     }

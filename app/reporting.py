@@ -99,9 +99,12 @@ def render_markdown(result: dict[str, Any]) -> str:
     for item in metric_rows:
         state = "显著" if item["significant"] else "不显著"
         if item["role"] == "guardrail":
-            state = {"breach": "越界", "watch": "临界", "ok": "正常", "n/a": "—"}[
+            state = {"breach": "越界", "watch": "临界", "ok": "正常",
+                     "not_estimable": "不可估计", "n/a": "—"}[
                 item["guardrail_status"]
             ]
+        elif not item.get("estimable", True):
+            state = "不可估计"
         lines.append(
             f"| {item['label']} | {item['role']} | {fmt_num(item['control_value'])} "
             f"| {fmt_num(item['treatment_value'])} | {fmt_num(item['absolute_effect'])} "

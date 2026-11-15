@@ -81,8 +81,8 @@ def _timestamp(value: Any, path: str) -> datetime:
 def _metric(raw: Any, path: str, role: str) -> MetricSpec:
     data = _mapping(raw, path)
     kind = _text(_required(data, "kind", path), f"{path}.kind")
-    if kind not in ("proportion", "mean"):
-        raise ConfigError(f"{path}.kind 只能是 proportion 或 mean")
+    if kind not in ("proportion", "mean", "ratio"):
+        raise ConfigError(f"{path}.kind 只能是 proportion、mean 或 ratio")
     orientation = _text(_required(data, "orientation", path), f"{path}.orientation")
     if orientation not in ("higher_is_better", "lower_is_better"):
         raise ConfigError(f"{path}.orientation 不受支持")
@@ -95,6 +95,29 @@ def _metric(raw: Any, path: str, role: str) -> MetricSpec:
     metric_key = _text(_required(data, "key", path), f"{path}.key")
     if not METRIC_KEY_RE.match(metric_key):
         raise ConfigError(f"{path}.key 必须是 2-64 位小写字母、数字或下划线")
+    if kind == "ratio":
+        if "column" in data:
+            raise ConfigError(f"{path}：ratio 指标使用 numerator_column/denominator_column，"
+                              "不能声明 column")
+        numerator_column = _text(
+            _required(data, "numerator_column", path), f"{path}.numerator_column"
+        )
+        denominator_column = _text(
+            _required(data, "denominator_column", path), f"{path}.denominator_column"
+        )
+        if numerator_column == denominator_column:
+            raise ConfigError(
+                f"{path}.numerator_column 与 denominator_column 不能是同一列"
+            )
+        return MetricSpec(metric_key, None,
+                          _text(_required(data, "label", path), f"{path}.label"),
+                          kind, orientation, alpha, min_effect, max_degradation,
+                          numerator_column=numerator_column,
+                          denominator_column=denominator_column)
+    if "numerator_column" in data or "denominator_column" in data:
+        raise ConfigError(
+            f"{path}：numerator_column/denominator_column 仅 ratio 指标允许使用"
+        )
     return MetricSpec(metric_key,
                       _text(_required(data, "column", path), f"{path}.column"),
                       _text(_required(data, "label", path), f"{path}.label"),

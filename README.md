@@ -37,8 +37,8 @@
 - 检查分流比例是否偏离声明期望，重复分配 / 重复曝光是否超限。
 - 检查同一 unit 是否同时进入声明互斥的实验。
 - 校验观测与分配是否一致、是否落在实验窗口内。
-- 计算比例类与均值类指标，输出绝对效应、相对效应、置信区间与 p 值。
-- 计算护栏指标劣化幅度，输出 `ok / watch / breach`。
+- 计算比例类、均值类与 pooled ratio 类指标，输出绝对效应、相对效应、置信区间与 p 值。
+- 计算护栏指标劣化幅度，输出 `ok / watch / breach`（分母总和为 0 时为 `not_estimable`）。
 - 按配置字段做分层复核，特别检查总体为正但某分层显著为负的方向反转。
 - 根据优先级和条件 flag 执行声明式规则，产生可解释的决策卡与规则评估轨迹。
 - 生成机器可读 JSON、可审阅 Markdown、自包含 HTML，并写入 SQLite。
@@ -240,6 +240,15 @@ metrics:
       orientation: lower_is_better
       max_degradation: 0.01
       alpha: 0.05
+    # ratio 指标：同一行的分子/分母作为不可拆开的样本对
+    # - key: revenue_per_order
+    #   label: 每订单收入
+    #   kind: ratio
+    #   numerator_column: revenue
+    #   denominator_column: orders
+    #   orientation: higher_is_better
+    #   min_effect: 0.2
+    #   alpha: 0.05
 stratification:
   fields: [platform, region]
   min_group_size: 80
@@ -257,7 +266,8 @@ decision:
 - 只支持一个对照 + 一个实验变体，变体键必须是 slug。
 - `split.expected` 必须覆盖全部变体、每项大于 0、总和为 1。
 - `split.tolerance` 在 `[0, 0.5]`，`min_assignments >= 2`。
-- 指标 `kind` 为 `proportion` 或 `mean`；`orientation` 为 `higher_is_better` 或 `lower_is_better`。
+- 指标 `kind` 为 `proportion`、`mean` 或 `ratio`；`orientation` 为 `higher_is_better` 或 `lower_is_better`。
+- `ratio` 指标不使用 `column`，必须分别声明 `numerator_column` 与 `denominator_column`，且两列不能相同；单列指标声明双列会被拒绝。
 - 指标 key 唯一；至少声明一个护栏。
 - 护栏的 `max_degradation` 对比例指标不能大于 1。
 - 分层字段非空且不重复；`max_groups >= 1`。
@@ -289,12 +299,15 @@ decision:
 | `experiment_id` | 实验 slug |
 | `variant` | 变体键 |
 | `observed_at` | ISO-8601 时间 |
-| 指标列 | 每个指标配置中的 `column`，例如 `activated`、`session_depth`、`crashed` |
+| 指标列 | 每个指标配置中的 `column`，例如 `activated`、`session_depth`、`crashed`；`ratio` 指标改用 `numerator_column` 与 `denominator_column` 两列 |
 
 数值规则：
 
 - 比例指标只接受 `0` 或 `1`。
 - 均值指标只接受有限浮点数。
+- `ratio` 指标的分子、分母都必须是有限数字，且同一行的两个数绑定为一个样本对，统计时不拆成两个独立检验。
+- `ratio` 分母必须非负：分母为负，或分母为 0 但分子非 0，都会按文件名与行号报错；分母为 0 且分子为 0 的行对两个总和贡献 0，但仍计入输入行数与随机化 unit 数。
+- 某一臂的分母总和为 0 时，该指标标记为 `not_estimable`：不输出点估计、CI、p 值，也不会被记成 0 或伪造显著性，主指标进入告警、护栏进入 `not_estimable` 状态。
 - 缺失列、空文件、非法时间、非法 unit 标识、未知变体都会中断读取，并给出文件名与行号。
 - 观测缺少对应分配、变体不一致、时间越界会进入审计 finding，而不是被静默忽略。
 - 重复分配与重复曝光由配置 `max_per_unit` / `tolerance` 判定。
@@ -313,7 +326,7 @@ decision:
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
 | `sample.size` | 每组样本不足 | 每组唯一观测单元少于 `ceil(min_assignments / 2)` |
 | `metric.primary` | 主指标证据 | 负向显著为 fail；稳健通过为 pass；其他为 warn |
-| `guardrail.status` | 护栏指标 | 任一越界为 fail；临界为 warn |
+| `guardrail.status` | 护栏指标 | 任一越界为 fail；临界或不可估计为 warn |
 | `stratification.reversal` | 分层稳健性 | 存在显著方向反转或同向分层占比不足 |
 
 检查状态只有 `pass / warn / fail`，按 `fail → warn → pass` 排序展示。
@@ -331,6 +344,8 @@ decision:
 
 - **比例指标**：两个独立比例检验。p 值用合并方差的标准误；效应置信区间用非合并方差 Wald 区间。
 - **均值指标**：Welch t 检验，置信区间使用 Welch–Satterthwaite 自由度和 t 分位数。
+- **ratio 指标（pooled ratio）**：每臂估计量为 `Σnumerator / Σdenominator`（每个事件/订单等权，适合“每订单收入”），效应为 treatment 与 control 的绝对差。标准误来自每个随机化 unit 的成对贡献：以影响函数 `y_i − R·d_i` 做 delta-method，同一 unit 内 numerator/denominator 的联合变化（含协方差）保留在残差平方中；分母列不作为样本量，两列也不拆成独立检验。p 值与置信区间使用同一个推断方差，`alpha` 同时驱动两者。零分母且零分子的 unit 计入 `n` 但不进入有效 unit 数与残差；整臂总分母为 0 时返回 `not_estimable`。
+- 口径区分：pooled ratio 按分母规模对 unit 加权；“每 unit 比率再平均”（unit_mean，每个随机化 unit 等权）是另一个估计问题，本工具不提供该选项，在分母规模悬殊的数据上两者效应方向都可能不同。
 - **卡方**：拟合优度统计量与上尾概率。
 - 数值函数包含误差函数、Lanczos `lgamma`、正则化不完全 Beta / Gamma 的连分式实现。
 - 所有 p 值夹取到 `[0, 1]`；零方差样本有显式退化处理。

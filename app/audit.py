@@ -100,11 +100,14 @@ def run_audit(
     findings.extend(stratification_findings)
 
     favorable_share = float(stratification_details["favorable_share"])
-    ci_favorable = (
-        primary.ci_low > 0.0
-        if config.primary.orientation == "higher_is_better"
-        else primary.ci_high < 0.0
-    )
+    if not getattr(primary, "estimable", True) or primary.ci_low is None:
+        ci_favorable = False
+    else:
+        ci_favorable = (
+            primary.ci_low > 0.0
+            if config.primary.orientation == "higher_is_better"
+            else primary.ci_high < 0.0
+        )
     robust = bool(
         primary.significant
         and primary.favorable
@@ -203,5 +206,8 @@ def run_audit(
             f"{config.name}：{decision['title']}；"
             f"{len(findings)} 条 finding，主指标效应 "
             f"{primary.absolute_effect:+.4f}"
+            if primary.absolute_effect is not None
+            else f"{config.name}：{decision['title']}；"
+                 f"{len(findings)} 条 finding，主指标不可估计"
         ),
     }

@@ -65,6 +65,38 @@ def _metric_value(raw: str, kind: str, path: str, line: int, column: str) -> flo
     return value
 
 
+def _finite_value(raw: str, path: str, line: int, column: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise DataValidationError(f"{path}:{line} 列 {column} 不是数字") from exc
+    if not math.isfinite(value):
+        raise DataValidationError(f"{path}:{line} 列 {column} 必须是有限数字")
+    return value
+
+
+def _ratio_pair(
+    row: dict[str, str], spec: Any, path: str, line: int
+) -> tuple[float, float]:
+    """按同一行解析 numerator/denominator 样本对并执行分母契约。"""
+    numerator = _finite_value(
+        row[spec.numerator_column], path, line, spec.numerator_column
+    )
+    denominator = _finite_value(
+        row[spec.denominator_column], path, line, spec.denominator_column
+    )
+    if denominator < 0.0:
+        raise DataValidationError(
+            f"{path}:{line} 指标 {spec.key} 的分母列 {spec.denominator_column} "
+            "不能为负数"
+        )
+    if denominator == 0.0 and numerator != 0.0:
+        raise DataValidationError(
+            f"{path}:{line} 指标 {spec.key} 分母为 0 时分子必须也为 0"
+        )
+    return numerator, denominator
+
+
 def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
     strata_fields = list(config.stratification.fields)
     rows = _rows(path, (*BASE_ASSIGNMENT_COLUMNS, *strata_fields))
@@ -108,8 +140,13 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
 
 def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]:
     specs = (config.primary, *config.secondary, *config.guardrails)
-    columns = [spec.column for spec in specs]
-    rows = _rows(path, (*BASE_OBSERVATION_COLUMNS, *columns))
+    columns: list[str] = []
+    for spec in specs:
+        if spec.is_ratio:
+            columns.extend([spec.numerator_column, spec.denominator_column])
+        else:
+            columns.append(spec.column)
+    rows = _rows(path, (*BASE_OBSERVATION_COLUMNS, *dict.fromkeys(columns)))
     variant_keys = {variant.key for variant in config.variants}
     observations: list[Observation] = []
     for index, row in enumerate(rows, start=2):
@@ -128,12 +165,16 @@ def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]
             )
         if not variant:
             raise DataValidationError(f"{path.name}:{index} variant 不能为空")
-        values = {
-            spec.key: _metric_value(
-                row[spec.column], spec.kind, path.name, index, spec.column
-            )
-            for spec in specs
-        }
+        values: dict[str, float] = {}
+        pairs: dict[str, tuple[float, float]] = {}
+        for spec in specs:
+            if spec.is_ratio:
+                # numerator 与 denominator 来自同一行，作为不可拆开的样本对保存。
+                pairs[spec.key] = _ratio_pair(row, spec, path.name, index)
+            else:
+                values[spec.key] = _metric_value(
+                    row[spec.column], spec.kind, path.name, index, spec.column
+                )
         observations.append(
             Observation(
                 unit_id=unit_id,
@@ -141,6 +182,7 @@ def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]
                 variant=variant,
                 observed_at=_parse_time(row["observed_at"], path.name, index),
                 values=values,
+                pairs=pairs,
             )
         )
     return observations
