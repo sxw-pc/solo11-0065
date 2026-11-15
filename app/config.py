@@ -95,10 +95,18 @@ def _metric(raw: Any, path: str, role: str) -> MetricSpec:
     metric_key = _text(_required(data, "key", path), f"{path}.key")
     if not METRIC_KEY_RE.match(metric_key):
         raise ConfigError(f"{path}.key 必须是 2-64 位小写字母、数字或下划线")
+    outcome_horizon: float | None = None
+    if "outcome_horizon" in data and data["outcome_horizon"] is not None:
+        outcome_horizon = _number(
+            data["outcome_horizon"], f"{path}.outcome_horizon", low=0.0
+        )
+        if outcome_horizon <= 0.0:
+            raise ConfigError(f"{path}.outcome_horizon 必须 > 0")
     return MetricSpec(metric_key,
                       _text(_required(data, "column", path), f"{path}.column"),
                       _text(_required(data, "label", path), f"{path}.label"),
-                      kind, orientation, alpha, min_effect, max_degradation)
+                      kind, orientation, alpha, min_effect, max_degradation,
+                      outcome_horizon)
 
 
 def _condition(raw: Any, path: str, depth: int = 0) -> dict[str, Any]:

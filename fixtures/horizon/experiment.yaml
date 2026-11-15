@@ -1,0 +1,143 @@
+schema_version: 1
+
+experiment:
+  id: exp-onboarding-maturity-2026
+  name: 新手引导成熟期实验
+  owner: growth-analytics
+  hypothesis: 新引导能提升 7 日激活率，且不影响崩溃率。
+  description: 结果成熟期演示。老 cohort 已走完 7 日窗口，新 cohort 仍在等待；主指标因此只能是 provisional。
+  start: "2026-03-01T00:00:00+00:00"
+  end: "2026-03-31T00:00:00+00:00"
+
+control: control
+variants:
+  control:
+    label: 对照组
+  treatment:
+    label: 实验组
+
+split:
+  expected:
+    control: 0.5
+    treatment: 0.5
+  tolerance: 0.05
+  min_assignments: 200
+
+exposure:
+  max_per_unit: 1
+  tolerance: 0
+
+metrics:
+  primary:
+    key: activation_rate
+    column: activated
+    label: 7 日激活率
+    kind: proportion
+    orientation: higher_is_better
+    min_effect: 0.02
+    alpha: 0.05
+    outcome_horizon: 7
+  secondary:
+    - key: session_depth
+      column: session_depth
+      label: 会话深度
+      kind: mean
+      orientation: higher_is_better
+      outcome_horizon: 21
+  guardrails:
+    - key: crash_rate
+      column: crashed
+      label: 崩溃率
+      kind: proportion
+      orientation: lower_is_better
+      max_degradation: 0.01
+      alpha: 0.05
+      outcome_horizon: 3
+
+stratification:
+  fields:
+    - platform
+  min_group_size: 40
+  max_groups: 8
+  alpha: 0.05
+  min_favorable_share: 0.75
+
+decision:
+  fallback: review
+  cards:
+    ship:
+      title: 可上线
+      action: 维持当前分流并放量；上线后继续监控护栏指标与分层效应。
+    iterate:
+      title: 继续迭代
+      action: 不直接放量；先补齐结论成熟所需的观测，再提交下一轮审计。
+    stop:
+      title: 停止
+      action: 停止该实验，保留当前分流台账；若存在护栏问题，先回滚相关策略。
+    review:
+      title: 人工复核
+      action: 由实验负责人复核数据质量、成熟度与分流关系，修复后重新运行审计。
+  rules:
+    - id: stop-negative-or-guardrail
+      card: stop
+      priority: 130
+      reason: 主指标显著负向或护栏指标越界，继续放量的风险不可接受。
+      when:
+        any:
+          - flag: primary_negative_significant
+          - flag: guardrail_breach
+    - id: review-data-integrity
+      card: review
+      priority: 120
+      reason: 分流比例、重复曝光、互斥冲突或数据一致性未通过，先复核数据。
+      when:
+        any:
+          - flag: split_imbalanced
+          - flag: duplicate_exposure
+          - flag: mutex_conflict
+          - flag: data_quality_failed
+    - id: review-measurement-pending
+      card: review
+      priority: 115
+      reason: 主指标仍有 pending cohort，结论只能是 provisional。
+      when:
+        any:
+          - flag: measurement_provisional
+    - id: review-data-warning
+      card: review
+      priority: 100
+      reason: 数据质量存在告警，决策证据尚不可靠。
+      when:
+        any:
+          - flag: data_quality_warning
+    - id: ship-robust
+      card: ship
+      priority: 90
+      reason: 分流健康、主指标成熟且显著正向、分层稳健、护栏未越界。
+      when:
+        all:
+          - flag: split_balanced
+          - flag: no_duplicate_exposure
+          - flag: no_mutex_conflict
+          - flag: data_quality_ok
+          - flag: coverage_ok
+          - flag: sample_sufficient
+          - flag: measurement_complete
+          - flag: primary_positive_significant
+          - flag: effect_meets_threshold
+          - flag: primary_effect_robust
+          - flag: no_guardrail_breach
+          - flag: no_guardrail_watch
+          - flag: no_stratified_reversal
+    - id: iterate-evidence
+      card: iterate
+      priority: 80
+      reason: 主指标证据不完整或分层存在反转/异质性，需要补证据或解释。
+      when:
+        any:
+          - flag: primary_inconclusive
+          - flag: sample_insufficient
+          - flag: measurement_incomplete
+          - flag: stratified_reversal
+          - flag: guardrail_watch
+          - flag: effect_fragile

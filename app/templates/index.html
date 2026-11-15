@@ -69,6 +69,7 @@
         <th>决策</th>
         <th class="num">主指标效应</th>
         <th class="num">p 值</th>
+        <th class="num">结果成熟</th>
         <th class="num">Finding</th>
         <th>生成时间</th>
         <th></th>
@@ -81,9 +82,17 @@
           <a class="run-name" href="{{ url_for('run_detail', run_id=row.run_id) }}">{{ row.experiment_name }}</a>
           <div class="mono-sub">{{ row.run_id }}</div>
         </td>
-        <td><span class="decision-pill {{ row.decision }}">{{ DECISION_LABELS.get(row.decision, row.decision) }}</span></td>
+        <td>
+          <span class="decision-pill {{ row.decision }}">{{ DECISION_LABELS.get(row.decision, row.decision) }}</span>
+          {% if row.provisional %}<span class="status warn">provisional</span>{% endif %}
+        </td>
         <td class="num">{{ "%+.4f"|format(row.primary_effect) }}</td>
         <td class="num">{{ row.primary_p_value|pval }}</td>
+        <td class="num">
+          {% if row.measurement_status != "legacy" %}
+          {{ row.measurement_status }}<div class="mono-sub">pending {{ row.pending_units }} · 缺数 {{ row.mature_but_missing_units }}</div>
+          {% else %}—{% endif %}
+        </td>
         <td class="num">{{ row.finding_count }}</td>
         <td class="time">{{ row.generated_at.replace("T", " ")[:19] }}</td>
         <td class="row-actions">

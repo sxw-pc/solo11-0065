@@ -41,8 +41,13 @@ def sample_check(
 def primary_check(
     primary: Any, robust: bool, favorable_share: float
 ) -> tuple[Check, list[Finding]]:
+    provisional = getattr(primary, "measurement_status", "legacy") == "provisional"
+    not_computed = not getattr(primary, "computed", True)
     if primary.significant and not primary.favorable:
         status = "fail"
+    elif provisional or not_computed:
+        # 成熟子样本即使显著为正，也不能作为最终结论。
+        status = "warn"
     elif robust:
         status = "pass"
     else:
@@ -53,13 +58,55 @@ def primary_check(
         "p_value": primary.p_value, "significant": primary.significant,
         "favorable": primary.favorable, "meets_threshold": primary.meets_threshold,
         "robust": robust, "favorable_share": favorable_share,
+        "measurement_status": getattr(primary, "measurement_status", "legacy"),
+        "provisional": provisional,
+        "computed": not not_computed,
+        "insufficient_reason": getattr(primary, "insufficient_reason", ""),
+        "control_n": primary.control_n, "treatment_n": primary.treatment_n,
     }
     check = Check(
         "metric.primary", "主指标效应", status,
         f"{primary.label} 效应 {primary.absolute_effect:.4f}，"
-        f"p={primary.p_value:.4f}，稳健={robust}", details,
+        f"p={primary.p_value:.4f}，稳健={robust}"
+        + ("，结果尚未完全成熟（provisional）" if provisional else "")
+        + (
+            f"，{primary.insufficient_reason}"
+            if not_computed and primary.insufficient_reason else ""
+        ),
+        details,
     )
     findings: list[Finding] = []
+    if provisional and not (primary.significant and not primary.favorable):
+        findings.append(
+            Finding(
+                code="metric.provisional", severity="medium", category="metric",
+                title="主指标结论暂定（存在未成熟 cohort）",
+                detail=(
+                    "当前效应只来自成熟子样本；仍有已分配 unit 未走完 "
+                    "outcome_horizon，不能据此给出最终上线结论。"
+                ),
+                evidence={
+                    "measurement_status": primary.measurement_status,
+                    "measurement": primary.measurement,
+                },
+            )
+        )
+    if not_computed and not (primary.significant and not primary.favorable):
+        reason = getattr(primary, "insufficient_reason", "") or (
+            "成熟观测不足以计算主指标。"
+        )
+        findings.append(
+            Finding(
+                code="metric.insufficient_mature_data", severity="medium",
+                category="metric",
+                title="成熟观测不足以计算主指标",
+                detail=reason,
+                evidence={
+                    "measurement_status": primary.measurement_status,
+                    "measurement": primary.measurement,
+                },
+            )
+        )
     if primary.significant and not primary.favorable:
         findings.append(
             Finding(
@@ -78,7 +125,7 @@ def primary_check(
                 evidence=asdict(primary),
             )
         )
-    elif primary.favorable and primary.significant and not robust:
+    elif primary.favorable and primary.significant and not robust and not provisional:
         findings.append(
             Finding(
                 code="metric.fragile", severity="medium", category="metric",
@@ -93,7 +140,13 @@ def primary_check(
 def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
     breaches = [item for item in guardrails if item.guardrail_status == "breach"]
     watches = [item for item in guardrails if item.guardrail_status == "watch"]
-    status = "fail" if breaches else ("warn" if watches else "pass")
+    pending = [item for item in guardrails if item.guardrail_status == "pending"]
+    if breaches:
+        status = "fail"
+    elif watches or pending:
+        status = "warn"
+    else:
+        status = "pass"
     details = {
         "metrics": [
             {"key": item.key, "label": item.label, "status": item.guardrail_status,
@@ -103,10 +156,12 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
         ],
         "breaches": [item.key for item in breaches],
         "watches": [item.key for item in watches],
+        "pending": [item.key for item in pending],
     }
     check = Check(
         "guardrail.status", "护栏指标", status,
-        f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项", details,
+        f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项"
+        + (f"，成熟度不足 {len(pending)} 项" if pending else ""), details,
     )
     findings: list[Finding] = []
     for item in guardrails:
@@ -118,6 +173,21 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
                     detail=f"劣化幅度 {item.degradation:.4%} 超过阈值 "
                            f"{item.max_degradation:.4%}。",
                     evidence=asdict(item),
+                )
+            )
+        elif item.guardrail_status == "pending":
+            findings.append(
+                Finding(
+                    code=f"guardrail.pending.{item.key}", severity="medium",
+                    category="guardrail", title=f"护栏指标成熟度不足：{item.label}",
+                    detail=(
+                        "该护栏的 outcome_horizon 尚未走完或成熟观测缺失，"
+                        "当前「未越界」不能作为最终结论。"
+                    ),
+                    evidence={
+                        "measurement_status": item.measurement_status,
+                        "measurement": item.measurement,
+                    },
                 )
             )
         elif item.guardrail_status == "watch":
@@ -141,6 +211,29 @@ def metrics_payload(primary: Any, secondary: list[Any], guardrails: list[Any]) -
     }
 
 
+def measurement_payload(
+    metrics: list[dict[str, Any]], checks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """报告与台账共用的成熟度证据汇总。"""
+    check = next(
+        (item for item in checks if item.get("code") == "measurement.maturity"),
+        None,
+    )
+    tracked = [
+        item for item in metrics if item.get("outcome_horizon") is not None
+    ]
+    return {
+        "tracked": bool(tracked),
+        "metrics": metrics,
+        "primary": next(
+            (item for item in metrics if item.get("role") == "primary"),
+            None,
+        ),
+        "check_status": check.get("status") if check else None,
+        "check_summary": check.get("summary") if check else None,
+    }
+
+
 def config_payload(config: ExperimentConfig) -> dict[str, Any]:
     return {
         "schema_version": config.schema_version,
@@ -161,10 +254,17 @@ def config_payload(config: ExperimentConfig) -> dict[str, Any]:
             "primary": {
                 "key": config.primary.key, "label": config.primary.label,
                 "min_effect": config.primary.min_effect, "alpha": config.primary.alpha,
+                "outcome_horizon": config.primary.outcome_horizon,
             },
+            "secondary": [
+                {"key": item.key, "label": item.label,
+                 "outcome_horizon": item.outcome_horizon}
+                for item in config.secondary
+            ],
             "guardrails": [
                 {"key": item.key, "label": item.label,
-                 "max_degradation": item.max_degradation}
+                 "max_degradation": item.max_degradation,
+                 "outcome_horizon": item.outcome_horizon}
                 for item in config.guardrails
             ],
         },
@@ -187,9 +287,40 @@ def build_flags(
     robust: bool,
     guardrails: list[Any],
     reversal: bool,
+    measurement: dict[str, Any] | None = None,
 ) -> dict[str, bool]:
     guardrail_breach = any(item.guardrail_status == "breach" for item in guardrails)
-    guardrail_watch = any(item.guardrail_status == "watch" for item in guardrails)
+    # 成熟度不足的护栏不能用「未越界」下结论，按 watch 处理。
+    guardrail_watch = any(
+        item.guardrail_status in ("watch", "pending") for item in guardrails
+    )
+    guardrail_pending = any(
+        item.guardrail_status == "pending" for item in guardrails
+    )
+    measurement = measurement or {"tracked": False, "metrics": [], "primary": None}
+    primary_measurement = measurement.get("primary") or {}
+    tracked = bool(measurement.get("tracked"))
+    primary_pending = int(primary_measurement.get("pending_units", 0) or 0) > 0
+    primary_missing = (
+        int(primary_measurement.get("mature_but_missing_units", 0) or 0) > 0
+        or int(primary_measurement.get("observed_before_horizon_units", 0) or 0) > 0
+    )
+    any_pending = any(
+        int(item.get("pending_units", 0) or 0) > 0
+        for item in measurement.get("metrics", [])
+        if item.get("outcome_horizon") is not None
+    )
+    measurement_status = getattr(primary, "measurement_status", "legacy")
+    provisional = tracked and measurement_status == "provisional"
+    measurement_coverage = float(
+        primary_measurement.get("measurement_coverage", 0.0) or 0.0
+    )
+    # 配置了 outcome_horizon 时，coverage_ok 必须看每个 unit 的成熟结果，
+    # 而不是「有没有任何一行观测」的全局覆盖率。
+    observed_coverage = float(quality_details.get("observation_coverage", 0.0))
+    coverage_for_flags = float(
+        quality_details.get("coverage_for_flags", observed_coverage)
+    )
     return {
         "split_balanced": split.status == "pass",
         "split_imbalanced": split.status != "pass",
@@ -200,15 +331,30 @@ def build_flags(
         "data_quality_ok": quality.status == "pass",
         "data_quality_warning": quality.status == "warn",
         "data_quality_failed": quality.status == "fail",
-        "coverage_ok": quality_details["observation_coverage"] >= 0.9
-        and quality.status != "fail",
+        "coverage_ok": coverage_for_flags >= 0.9
+        and quality.status != "fail"
+        and (not tracked or measurement_coverage >= 0.9),
         "sample_sufficient": sample.status == "pass",
         "sample_insufficient": sample.status != "pass",
-        "primary_positive_significant": primary.significant and primary.favorable,
+        "measurement_tracked": tracked,
+        "measurement_complete": bool(
+            tracked and measurement_status == "complete"
+        ),
+        "measurement_provisional": provisional,
+        "measurement_pending": primary_pending,
+        "measurement_incomplete": primary_missing,
+        "measurement_missing": primary_missing,
+        "any_measurement_pending": any_pending,
+        "maturity_coverage_ok": (
+            not tracked or measurement_coverage >= 0.9
+        ),
+        "primary_positive_significant": (
+            primary.significant and primary.favorable and not provisional
+        ),
         "primary_negative_significant": primary.significant and not primary.favorable,
         "primary_inconclusive": not primary.significant,
-        "effect_meets_threshold": primary.meets_threshold,
-        "primary_effect_robust": robust,
+        "effect_meets_threshold": primary.meets_threshold and not provisional,
+        "primary_effect_robust": robust and not provisional,
         "effect_fragile": primary.significant and primary.favorable and not robust,
         "stratified_reversal": reversal,
         "no_stratified_reversal": not reversal,
@@ -216,4 +362,5 @@ def build_flags(
         "no_guardrail_breach": not guardrail_breach,
         "guardrail_watch": guardrail_watch,
         "no_guardrail_watch": not guardrail_watch,
+        "guardrail_measurement_pending": guardrail_pending,
     }

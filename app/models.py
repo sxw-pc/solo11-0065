@@ -3,10 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 SCHEMA_VERSION = 1
+
+# 结果成熟度：以「唯一 assignment unit」为分母的逐指标 cohort 状态。
+MEASUREMENT_STATUSES = (
+    "mature",
+    "pending",
+    "mature_but_missing",
+    "observed_before_horizon",
+)
+MEASUREMENT_STATUS_LABELS = {
+    "mature": "成熟可用",
+    "pending": "等待成熟",
+    "mature_but_missing": "成熟缺数",
+    "observed_before_horizon": "早于窗口",
+    # 指标级聚合状态
+    "complete": "全部成熟",
+    "incomplete": "成熟缺数",
+    "provisional": "等待成熟",
+    "legacy": "旧口径",
+    "unverified": "未校验",
+    "no_data": "无观测",
+}
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 SEVERITY_LABELS = {
@@ -41,10 +62,22 @@ class MetricSpec:
     alpha: float = 0.05
     min_effect: float = 0.0
     max_degradation: float = 0.0
+    # 结果成熟期（天）。None 表示未配置，沿用旧行为：全部观测直接入指标。
+    outcome_horizon: float | None = None
 
     @property
     def favorable_sign(self) -> int:
         return 1 if self.orientation == "higher_is_better" else -1
+
+    @property
+    def has_horizon(self) -> bool:
+        return self.outcome_horizon is not None
+
+    def mature_at(self, assigned_at: datetime) -> datetime | None:
+        """每个 unit 自 assigned_at 起的固定追踪窗终点；边界含等号。"""
+        if self.outcome_horizon is None:
+            return None
+        return assigned_at + timedelta(days=self.outcome_horizon)
 
 
 @dataclass(frozen=True)
@@ -190,6 +223,12 @@ class MetricResult:
     guardrail_status: str
     degradation: float
     max_degradation: float
+    # 结果成熟期相关。默认值保证未配置 horizon 的调用方完全兼容。
+    outcome_horizon: float | None = None
+    measurement_status: str = "legacy"  # legacy | complete | incomplete | provisional
+    measurement: dict[str, Any] = field(default_factory=dict)
+    computed: bool = True
+    insufficient_reason: str = ""
 
 
 @dataclass(frozen=True)

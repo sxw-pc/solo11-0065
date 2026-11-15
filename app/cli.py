@@ -28,6 +28,18 @@ def _root(value: str) -> Path:
     return Path(value).resolve()
 
 
+def _parse_as_of(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"--as-of 不是合法 ISO-8601 时间：{exc}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _run_pipeline(
     root: Path,
     config_path: Path,
@@ -35,6 +47,7 @@ def _run_pipeline(
     observations_path: Path,
     out_dir: Path,
     db_path: Path,
+    as_of: datetime | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     config_target = resolve_under(root, config_path, must_exist=True)
     assignments_target = resolve_under(root, assignments_path, must_exist=True)
@@ -43,7 +56,7 @@ def _run_pipeline(
     ledger_target = ensure_output_path(root, db_path)
     config = load_config(config_target)
     dataset = load_dataset(config, assignments_target, observations_target)
-    now = datetime.now(timezone.utc)
+    now = as_of or datetime.now(timezone.utc)
     input_digest = sha256_files(
         [config_target, assignments_target, observations_target]
     )
@@ -85,6 +98,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         Path(args.observations),
         Path(args.out),
         Path(args.db),
+        _parse_as_of(args.as_of),
     )
     _print_result(result, run_dir, db_path)
     print("下一步：python -m app serve --port 5000")
@@ -100,6 +114,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         Path(args.observations),
         Path(args.out),
         Path(args.db),
+        _parse_as_of(args.as_of),
     )
     _print_result(result, run_dir, db_path)
     return 0
@@ -161,6 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--observations", default=DEFAULT_OBSERVATIONS)
     demo.add_argument("--out", default=DEFAULT_OUT)
     demo.add_argument("--db", default=DEFAULT_DB)
+    demo.add_argument(
+        "--as-of", default=None,
+        help="结果成熟度的判定时点（ISO-8601，默认当前 UTC 时间）",
+    )
     demo.set_defaults(handler=_cmd_demo)
 
     audit = sub.add_parser("audit", help="审计指定本地输入")
@@ -169,6 +188,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--observations", default=DEFAULT_OBSERVATIONS)
     audit.add_argument("--out", default=DEFAULT_OUT)
     audit.add_argument("--db", default=DEFAULT_DB)
+    audit.add_argument(
+        "--as-of", default=None,
+        help="结果成熟度的判定时点（ISO-8601，默认当前 UTC 时间）",
+    )
     audit.set_defaults(handler=_cmd_audit)
 
     serve = sub.add_parser("serve", help="启动仅监听 127.0.0.1 的本地 Web")

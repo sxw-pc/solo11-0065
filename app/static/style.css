@@ -60,10 +60,11 @@ tr:last-child td { border-bottom: 0; }
 .row-actions a + a { margin-left: 9px; }
 .decision-pill, .status { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .decision-pill.ship, .status.pass, .status.ok { color: var(--pass); background: var(--pass-bg); }
-.decision-pill.iterate, .status.warn, .status.watch, .status.medium { color: var(--warn); background: var(--warn-bg); }
+.decision-pill.iterate, .status.warn, .status.watch, .status.medium, .status.pending { color: var(--warn); background: var(--warn-bg); }
 .decision-pill.stop, .status.fail, .status.breach, .status.high, .status.critical { color: var(--fail); background: var(--fail-bg); }
 .decision-pill.review { color: var(--review); background: #eaf1fb; }
 .status.neutral, .status.low, .status.info { color: var(--navy); background: var(--navy-soft); }
+.notice-warn { border-color: var(--warn); border-left: 4px solid var(--warn); text-align: left; background: var(--warn-bg); }
 .empty-state { background: var(--paper); border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 44px; text-align: center; margin: 16px 0; }
 .empty-state.slim { padding: 20px; }
 .empty-state h1 { font-size: 48px; margin: 0; }

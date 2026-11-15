@@ -121,7 +121,7 @@
 
     <section class="decision {{ decision.card }}" aria-label="决策卡">
       <div>
-        <div class="eyebrow">Decision card</div>
+        <div class="eyebrow">Decision card{% if decision.provisional %} · provisional{% endif %}</div>
         <div class="decision-title">{{ decision.title }}</div>
         <div class="action">{{ decision.action }}</div>
       </div>
@@ -129,9 +129,15 @@
         <div class="fact"><span>命中规则</span><strong>{{ decision.matched_rule }}</strong></div>
         <div class="fact"><span>规则理由</span><strong>{{ decision.reason }}</strong></div>
         <div class="fact"><span>决策卡</span><strong>{{ decision.card }}</strong></div>
+        <div class="fact"><span>结果成熟</span><strong>{{ decision.measurement_status }}</strong></div>
         <div class="fact"><span>输入摘要</span><strong class="hash">{{ result.run.input_digest[:16] }}…</strong></div>
       </div>
     </section>
+    {% if result.run.provisional %}
+    <div class="empty" style="border-left:4px solid var(--warn);margin-top:12px">
+      <strong>provisional</strong>：主指标仍有 pending cohort，当前效应只代表成熟子样本，不能作为最终上线结论。
+    </div>
+    {% endif %}
 
     <div class="tiles">
       <div class="tile">
@@ -171,7 +177,7 @@
             <td class="num">{{ metric.p_value|pval }}</td>
             <td>
               {% if metric.role == "guardrail" %}
-              <span class="badge {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
+              <span class="badge {{ metric.guardrail_status }}">{{ {"breach": "越界", "watch": "临界", "ok": "正常", "pending": "成熟度不足", "n/a": "—"}.get(metric.guardrail_status, metric.guardrail_status) }}</span>
               {% elif metric.significant %}
               <span class="badge {{ "pass" if metric.favorable else "fail" }}">{{ "正向显著" if metric.favorable else "负向显著" }}</span>
               {% else %}
@@ -183,6 +189,54 @@
         </tbody>
       </table>
     </div>
+
+    <h2>结果成熟期</h2>
+    {% set tracked_measurements = (result.measurement.metrics or [])|selectattr("outcome_horizon")|list %}
+    {% if not tracked_measurements %}
+    <div class="empty">未配置 <code>outcome_horizon</code>，沿用旧行为：全部观测参与指标计算。</div>
+    {% else %}
+    <div class="scroll">
+      <table>
+        <thead><tr><th>指标</th><th>角色</th><th class="num">horizon</th><th class="num">分母</th><th class="num">成熟</th><th class="num">pending</th><th class="num">成熟缺数</th><th class="num">早于窗口</th><th class="num">成熟覆盖</th><th>状态</th></tr></thead>
+        <tbody>
+          {% for item in tracked_measurements %}
+          <tr>
+            <td>{{ item.label }}<br><span class="finding-code">{{ item.metric_key }}</span></td>
+            <td>{{ item.role }}</td>
+            <td class="num">{{ item.outcome_horizon }}</td>
+            <td class="num">{{ item.denominator_units }}</td>
+            <td class="num">{{ item.eligible_units }}</td>
+            <td class="num">{{ item.pending_units }}</td>
+            <td class="num">{{ item.mature_but_missing_units }}</td>
+            <td class="num">{{ item.observed_before_horizon_units }}</td>
+            <td class="num">{{ item.measurement_coverage|pct(1) }}</td>
+            <td>{{ MEASUREMENT_STATUS_LABELS.get(item.status, item.status) }}{% if item.status in MEASUREMENT_STATUS_LABELS %}（{{ item.status }}）{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% set primary_cohorts = (result.measurement.primary or {}).get("pending_cohorts", []) %}
+    {% if primary_cohorts %}
+    <h3>主指标等待中的 cohort</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>入组日</th><th>成熟时点</th><th class="num">units</th><th>分臂</th></tr></thead>
+        <tbody>
+          {% for cohort in primary_cohorts %}
+          <tr>
+            <td>{{ cohort.assigned_date }}</td>
+            <td>{{ cohort.mature_at }}{% if cohort.mature_at_latest %} → {{ cohort.mature_at_latest }}{% endif %}</td>
+            <td class="num">{{ cohort.units }}</td>
+            <td>{% for key, value in cohort.by_variant.items() %}{{ key }}={{ value }}{% if not loop.last %} · {% endif %}{% endfor %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <p class="lede">固定追踪窗：每个 unit 自 assigned_at 起算，成熟时点含边界；早于 horizon 的快照与成熟后缺数分开呈现。</p>
+    {% endif %}
 
     <h2>自动检查</h2>
     <div class="checks">

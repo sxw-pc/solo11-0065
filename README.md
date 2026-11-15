@@ -26,6 +26,7 @@
 - [安全与离线边界](#安全与离线边界)
 - [测试](#测试)
 - [已知边界](#已知边界)
+- [结果成熟期](#结果成熟期可选)
 
 ---
 
@@ -119,6 +120,8 @@ python -m app --root /path/to/project demo
 ```
 
 `--root` 是全局参数，应放在子命令之前。
+
+`demo` 与 `audit` 都支持 `--as-of <ISO-8601>`，用于固定结果成熟期的判定时点 `run.generated_at`（默认当前 UTC 时间）。复现含 `outcome_horizon` 的审计时建议显式传入。
 
 ### 查询台账
 
@@ -231,6 +234,7 @@ metrics:
     orientation: higher_is_better
     min_effect: 0.02
     alpha: 0.05
+    outcome_horizon: 7          # 可选：分配后 N 天的固定追踪窗
   secondary: []
   guardrails:
     - key: crash_rate
@@ -240,6 +244,7 @@ metrics:
       orientation: lower_is_better
       max_degradation: 0.01
       alpha: 0.05
+      outcome_horizon: 3
 stratification:
   fields: [platform, region]
   min_group_size: 80
@@ -260,6 +265,7 @@ decision:
 - 指标 `kind` 为 `proportion` 或 `mean`；`orientation` 为 `higher_is_better` 或 `lower_is_better`。
 - 指标 key 唯一；至少声明一个护栏。
 - 护栏的 `max_degradation` 对比例指标不能大于 1。
+- `outcome_horizon` 可选，单位是天（支持小数），必须大于 0；不配置时保持旧行为。
 - 分层字段非空且不重复；`max_groups >= 1`。
 - 决策卡必须包含 `ship / iterate / stop / review`；规则 id 唯一，只能使用 `flag / all / any / none` 条件。
 - 条件嵌套深度有限制；拒绝任意表达式或代码执行。
@@ -311,12 +317,33 @@ decision:
 | `exposure.duplicate` | 重复分配 / 重复曝光 | 单 unit 次数超过 `max_per_unit` 且额外次数超过 `tolerance` |
 | `mutex.conflict` | 互斥实验冲突 | 本实验 unit 也出现在声明的互斥实验分配中 |
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
+| `measurement.maturity` | 结果成熟度 | 仅在配置了 `outcome_horizon` 时出现；存在 pending / 成熟缺数时为 warn |
 | `sample.size` | 每组样本不足 | 每组唯一观测单元少于 `ceil(min_assignments / 2)` |
 | `metric.primary` | 主指标证据 | 负向显著为 fail；稳健通过为 pass；其他为 warn |
-| `guardrail.status` | 护栏指标 | 任一越界为 fail；临界为 warn |
+| `guardrail.status` | 护栏指标 | 任一越界为 fail；临界或成熟度不足为 warn |
 | `stratification.reversal` | 分层稳健性 | 存在显著方向反转或同向分层占比不足 |
 
 检查状态只有 `pass / warn / fail`，按 `fail → warn → pass` 排序展示。
+
+### 结果成熟期（可选）
+
+`MetricSpec.outcome_horizon` 让每个指标回答“分配后 N 天内是否转化”，并保证不同入组日期的 unit 使用同样长的曝光窗口。每个指标独立配置、独立计算：
+
+| 状态 | 判定 | 是否进入效应/CI |
+| --- | --- | --- |
+| `mature` | `run.generated_at >= assigned_at + horizon`，且存在 `mature_at <= observed_at <= run` 的观测 | 是（每 unit 取最早一条成熟观测） |
+| `pending` | `run.generated_at < assigned_at + horizon` | 否；不计为零，也不写成永久缺数 |
+| `mature_but_missing` | 已到成熟时点但没有任何 `observed_at >= mature_at` 的观测 | 否；暴露 attrition |
+| `observed_before_horizon` | 已到成熟时点但只有早于成熟时点的观测 | 否；不能当作固定窗结果 |
+
+口径细节：
+
+- **边界含等号**：`run.generated_at == assigned_at + horizon` 与 `observed_at == mature_at` 都算成熟。
+- **分母是唯一 assignment unit**，不是观测行；同一 unit 的重复分配取首条、重复观测取最早的成熟一条。
+- **迟到报告**：`observed_at` 在实验 `end` 之后、`run.generated_at` 之前到达且满足成熟窗的观测可用；晚于 run 的「未来」记录不参与分析并计入数据质量异常。
+- **不同指标不同 horizon**：primary / secondary / guardrail 各自用自己的成熟观测集，因此有效样本数可以不同；`sample.size` 与分层复核使用主指标的成熟观测集。
+- **决策**：主指标仍有 pending 时，run 标记 `provisional`，`ship`/`iterate` 统一降级为 `review`；`stop`（来自已成熟的负向或护栏证据）保留但同样标记 provisional。未配置 horizon 的旧配置行为完全不变。
+- **护栏**：horizon 未走完或成熟缺口时，护栏状态为 `pending`（按 `watch` 影响 flags），不能用“未越界”下结论。
 
 ### 分流比例
 
@@ -430,17 +457,25 @@ when:
 | `no_mutex_conflict` / `mutex_conflict` | 无互斥冲突 / 有互斥冲突 |
 | `data_quality_ok` | 数据一致性检查为 pass |
 | `data_quality_warning` / `data_quality_failed` | 数据质量为 warn / fail |
-| `coverage_ok` | 观测覆盖率至少 90% 且无结构性异常 |
+| `coverage_ok` | 观测覆盖率至少 90%，且（配置 horizon 时）主指标成熟覆盖也至少 90% |
 | `sample_sufficient` / `sample_insufficient` | 每组样本达标 / 不达标 |
-| `primary_positive_significant` | 主指标显著且方向有利 |
+| `measurement_tracked` | 至少一个指标配置了 `outcome_horizon` |
+| `measurement_complete` | 主指标全部唯一 assignment unit 均已成熟 |
+| `measurement_provisional` | 主指标仍有 pending cohort |
+| `measurement_pending` | 主指标存在 pending unit |
+| `measurement_incomplete` / `measurement_missing` | 主指标存在成熟缺数或早于窗口的观测 |
+| `any_measurement_pending` | 任一指标存在 pending unit |
+| `maturity_coverage_ok` | 主指标成熟覆盖率至少 90%（未配置 horizon 时恒为 true） |
+| `primary_positive_significant` | 主指标显著且方向有利，且不是 provisional |
 | `primary_negative_significant` | 主指标显著且方向不利 |
 | `primary_inconclusive` | 主指标不显著 |
-| `effect_meets_threshold` | 绝对效应达到 `min_effect` |
-| `primary_effect_robust` | 上述全部稳健条件通过 |
+| `effect_meets_threshold` | 绝对效应达到 `min_effect` 且不是 provisional |
+| `primary_effect_robust` | 上述全部稳健条件通过且不是 provisional |
 | `effect_fragile` | 显著正向但不够稳健 |
 | `stratified_reversal` / `no_stratified_reversal` | 有 / 无显著方向反转 |
 | `guardrail_breach` / `no_guardrail_breach` | 有 / 无护栏越界 |
-| `guardrail_watch` / `no_guardrail_watch` | 有 / 无护栏临界 |
+| `guardrail_watch` / `no_guardrail_watch` | 有 / 无护栏临界（成熟度不足的护栏按临界处理） |
+| `guardrail_measurement_pending` | 护栏指标成熟度不足 |
 
 ---
 
@@ -452,10 +487,39 @@ when:
 
 | 文件 | 内容 |
 | --- | --- |
-| `audit.json` | 完整结构化审计结果：run、实验、counts、flags、checks、findings、metrics、stratification、decision、reproducibility |
-| `decision_card.json` | 精炼决策卡：决策、命中规则、主指标、护栏、检查摘要、输入摘要 |
-| `report.md` | 中文可审阅报告，含决策卡、指标、检查、findings、分层、复现信息 |
+| `audit.json` | 完整结构化审计结果：run、实验、counts、flags、checks、findings、metrics、measurement、stratification、decision、reproducibility |
+| `decision_card.json` | 精炼决策卡：决策、命中规则、主指标、护栏、成熟度证据、检查摘要、输入摘要 |
+| `report.md` | 中文可审阅报告，含决策卡、指标、检查、结果成熟期、findings、分层、复现信息 |
 | `report.html` | 自包含 HTML；内联 CSS，不使用外部脚本、字体、图片或 CDN |
+
+`audit.json.measurement` 汇总每个配置了 `outcome_horizon` 的指标：
+
+```json
+{
+  "tracked": true,
+  "primary": {
+    "metric_key": "activation_rate",
+    "outcome_horizon": 7.0,
+    "as_of": "2026-03-22T00:00:00+00:00",
+    "status": "provisional",
+    "denominator_units": 600,
+    "denominator_units_by_variant": {"control": 300, "treatment": 300},
+    "eligible_units": 320,
+    "eligible_units_by_variant": {"control": 160, "treatment": 160},
+    "pending_units": 200,
+    "mature_but_missing_units": 80,
+    "observed_before_horizon_units": 0,
+    "measurement_coverage": 0.53333333,
+    "status_by_variant": {"control": {"mature": 160, "pending": 100, "...": 0}, "...": {}},
+    "pending_cohorts": [{"assigned_date": "2026-03-19", "mature_at": "...", "units": 100, "by_variant": {"control": 50, "treatment": 50}}],
+    "units": [{"unit_id": "unit-0001", "status": "mature", "mature_at": "...", "observed_at": "...", "...": "..."}]
+  },
+  "check_status": "warn",
+  "check_summary": "..."
+}
+```
+
+`units` 明细按指标数量分摊预算（默认约 300 条），超出部分只在 `units_truncated` 标记；所有计数与覆盖率始终基于全部唯一 assignment unit。
 
 `report.html` 生成时会压缩标签间空白，保持单文件紧凑；源模板仍保留可读格式。
 
@@ -465,13 +529,13 @@ when:
 
 | 表 | 作用 |
 | --- | --- |
-| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、摘要哈希、产物目录 |
+| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、provisional / 成熟度状态与覆盖率、摘要哈希、产物目录 |
 | `checks` | 检查项、状态、摘要与细节 JSON |
 | `findings` | 结构化问题、严重度、类别、证据 JSON |
 | `metrics` | 主指标、次级指标与护栏的统计结果 |
 | `strata` | 每个分层组的样本量、效应、p 值、可评估与反转标记 |
 
-台账使用参数化 SQL、外键和事务；同一个 run_id 重写会先清理旧子记录，保证幂等。
+台账使用参数化 SQL、外键和事务；同一个 run_id 重写会先清理旧子记录，保证幂等。旧版台账会在启动时通过 `ALTER TABLE` 补齐 `provisional / measurement_status / maturity_coverage / pending_units / mature_but_missing_units` 列，历史 run 默认 `legacy`。
 
 ---
 
@@ -524,6 +588,25 @@ python -m app serve --port 5000
 
 这组 fixture 特意同时覆盖“比例健康、主指标正向显著、护栏临界、分层反转”这一类真实审计中常见的冲突证据，避免演示退化为单一阈值判断。
 
+### 结果成熟期 fixture
+
+`fixtures/horizon/` 演示 `outcome_horizon` 口径，包含两个 cohort：
+
+- 早期 cohort：3 月 1–5 日入组，7 日主指标窗口已走完；其中 80 个 unit 成熟后仍无观测（attrition）。
+- 新 cohort：3 月 19–20 日入组，run 时只有第 1 天的早期快照。
+
+主指标 horizon 7 天、会话深度 21 天、崩溃率 3 天，因此同一 run 下三个指标的有效样本数不同。以 `--as-of 2026-03-22` 运行时：
+
+```bash
+python -m app audit \
+  --experiment fixtures/horizon/experiment.yaml \
+  --assignments fixtures/horizon/assignments.csv \
+  --observations fixtures/horizon/observations.csv \
+  --as-of 2026-03-22T00:00:00+00:00
+```
+
+预期：主指标成熟子样本显著为正，但仍有 200 个 pending unit，因此决策为 **人工复核（review）** 并标记 `provisional`，同时产生 `measurement_pending`、`measurement_incomplete`、`metric.provisional` 与 `guardrail.pending.crash_rate`。同一条命令去掉 `--as-of`（按当前时间）时，新 cohort 已过成熟时点：若仍无成熟观测则归为 `observed_before_horizon`，不会再被当作 pending。
+
 ---
 
 ## 确定性与复现
@@ -568,6 +651,8 @@ pytest -q
 - 统计函数与已知参考值：正态分位数、比例检验、Welch t、卡方、t 分位数。
 - YAML/CSV 契约失败路径、非法 unit_id、非法比例值、路径逃逸。
 - 完整 fixture 审计、分流失衡、重复曝光、互斥冲突、未分配观测、负向主指标。
+- 结果成熟期：旧配置兼容、成熟边界含等号、pending 与 mature_but_missing 不互换、不同 horizon 得到不同有效样本与 CI、主指标 pending 时阻断 ship、重复分配/观测不放大分母、迟到报告可用而未来记录不可用。
+- 结果成熟期在配置校验、JSON/Markdown/自包含 HTML、决策卡、SQLite（含旧表迁移）中的展示。
 - 规则优先级、fallback、`all/any/none`、引用 flag 检查。
 - 四种产物的完整性、HTML 自包含、行数约束、Markdown 内容。
 - SQLite 写入、幂等、列表/筛选/读取。
@@ -578,6 +663,7 @@ pytest -q
 ## 已知边界
 
 - 只支持双变体 A/B；多臂实验需要扩展指标模型与分层策略。
+- 结果成熟期只支持 per-unit 固定追踪窗（从 `assigned_at` 起算）；统一日历截点口径可以用 `--as-of` 模拟某一时刻的快照，但不会把不同入组日期的随访时长对齐。
 - 比例指标使用二项近似 z 检验；小样本极端比例应改用精确检验或分层样本说明。
 - 均值指标要求每组至少 2 个观测。
 - 分层是描述性复核，不是因果异质性检验；因果推断不在范围内。

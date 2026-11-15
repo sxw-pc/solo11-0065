@@ -9,7 +9,12 @@ from typing import Any
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
 from . import ledger
-from .models import CHECK_LABELS, DECISION_LABELS, SEVERITY_LABELS
+from .models import (
+    CHECK_LABELS,
+    DECISION_LABELS,
+    MEASUREMENT_STATUS_LABELS,
+    SEVERITY_LABELS,
+)
 from .reporting import ARTIFACTS, fmt_num, fmt_p, fmt_pct
 from .safety import PathSecurityError, resolve_under
 
@@ -63,6 +68,7 @@ def create_app(
             "DECISION_LABELS": DECISION_LABELS,
             "SEVERITY_LABELS": SEVERITY_LABELS,
             "CHECK_LABELS": CHECK_LABELS,
+            "MEASUREMENT_STATUS_LABELS": MEASUREMENT_STATUS_LABELS,
         }
 
     @app.get("/")

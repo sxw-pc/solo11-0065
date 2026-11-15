@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS runs (
     input_digest TEXT NOT NULL,
     config_digest TEXT NOT NULL,
     artifact_dir TEXT NOT NULL,
-    decision_json TEXT NOT NULL
+    decision_json TEXT NOT NULL,
+    provisional INTEGER NOT NULL DEFAULT 0,
+    measurement_status TEXT NOT NULL DEFAULT 'legacy',
+    maturity_coverage REAL,
+    pending_units INTEGER NOT NULL DEFAULT 0,
+    mature_but_missing_units INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +91,15 @@ CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_strata_run ON strata(run_id);
 """
 
+# 兼容旧台账：新增列以 ALTER TABLE 方式补齐，不丢历史 run。
+RUN_MIGRATIONS = (
+    ("provisional", "INTEGER NOT NULL DEFAULT 0"),
+    ("measurement_status", "TEXT NOT NULL DEFAULT 'legacy'"),
+    ("maturity_coverage", "REAL"),
+    ("pending_units", "INTEGER NOT NULL DEFAULT 0"),
+    ("mature_but_missing_units", "INTEGER NOT NULL DEFAULT 0"),
+)
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -102,6 +116,14 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path) -> None:
     with closing(connect(db_path)) as connection:
         connection.executescript(SCHEMA)
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+        }
+        for name, definition in RUN_MIGRATIONS:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE runs ADD COLUMN {name} {definition}"
+                )
         connection.commit()
 
 
@@ -113,6 +135,12 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
     experiment = result["experiment"]["experiment"]
     primary = result["metrics"]["primary"]
     decision = result["decision"]
+    measurement = result.get("measurement") or {}
+    primary_measurement = measurement.get("primary") or {}
+    counts = result.get("counts") or {}
+    provisional = bool(
+        result.get("run", {}).get("provisional", decision.get("provisional", False))
+    )
     init_db(db_path)
     with closing(connect(db_path)) as connection, connection:
         for table in ("checks", "findings", "metrics", "strata", "runs"):
@@ -122,15 +150,21 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
                 run_id, generated_at, experiment_id, experiment_name, decision,
                 decision_title, matched_rule, decision_reason, headline,
                 primary_metric_key, primary_effect, primary_p_value, finding_count,
-                input_digest, config_digest, artifact_dir, decision_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_digest, config_digest, artifact_dir, decision_json,
+                provisional, measurement_status, maturity_coverage,
+                pending_units, mature_but_missing_units
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id, run["generated_at"], experiment["id"], experiment["name"],
                 decision["card"], decision["title"], decision["matched_rule"],
                 decision["reason"], result["headline"], primary["key"],
                 primary["absolute_effect"], primary["p_value"],
                 len(result["findings"]), run["input_digest"], run["config_digest"],
-                artifact_dir, _json(decision),
+                artifact_dir, _json(decision), int(provisional),
+                str(primary.get("measurement_status", "legacy")),
+                primary_measurement.get("measurement_coverage"),
+                int(counts.get("pending_units", 0) or 0),
+                int(counts.get("mature_but_missing_units", 0) or 0),
             ),
         )
         connection.executemany(

@@ -1,10 +1,19 @@
-"""分流健康检查：比例、重复曝光、互斥冲突与输入一致性。"""
+"""分流健康检查：比例、重复曝光、互斥冲突、输入一致性与结果成熟期。"""
 
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from typing import Iterable
-from .models import Assignment, Check, ExperimentConfig, Finding, Observation
+
+from .metrics import assess_measurement
+from .models import (
+    Assignment,
+    Check,
+    ExperimentConfig,
+    Finding,
+    Observation,
+)
 from .stats import chi_square_gof
 
 
@@ -90,14 +99,26 @@ def assess_split(
 
 
 def assess_exposure(
-    config: ExperimentConfig, assignments: list[Assignment], observations: list[Observation]
+    config: ExperimentConfig,
+    assignments: list[Assignment],
+    observations: list[Observation],
+    *,
+    snapshot_mode: bool = False,
 ) -> tuple[Check, dict[str, object], list[Finding]]:
     assignment_counts = Counter(
         row.unit_id for row in _primary_assignments(config, assignments)
     )
-    observation_counts = Counter(
-        row.unit_id for row in _primary_observations(config, observations)
-    )
+    if snapshot_mode:
+        # 固定追踪窗下，同一 unit 在不同时间点产生多条快照是预期行为；
+        # 只有同一时刻的重复行才算重复曝光。
+        observation_counts = Counter(
+            (row.unit_id, row.observed_at)
+            for row in _primary_observations(config, observations)
+        )
+    else:
+        observation_counts = Counter(
+            row.unit_id for row in _primary_observations(config, observations)
+        )
     assignment_duplicates = {
         unit: count for unit, count in assignment_counts.items()
         if count > config.exposure.max_per_unit
@@ -114,18 +135,24 @@ def assess_exposure(
     )
     total_extra = extra_assignments + extra_exposures
     status = "fail" if total_extra > config.exposure.tolerance else "pass"
+    duplicate_units = {
+        unit[0] if isinstance(unit, tuple) else unit
+        for unit in observation_duplicates
+    }
     details = {
         "max_per_unit": config.exposure.max_per_unit,
         "tolerance": config.exposure.tolerance,
+        "snapshot_mode": snapshot_mode,
         "duplicate_assignment_units": len(assignment_duplicates),
-        "duplicate_exposure_units": len(observation_duplicates),
+        "duplicate_exposure_units": len(duplicate_units),
         "extra_assignments": extra_assignments,
         "extra_exposures": extra_exposures,
-        "sample_units": sorted(observation_duplicates)[:10],
+        "sample_units": sorted(duplicate_units)[:10],
     }
     summary = (
         f"重复分配单元 {len(assignment_duplicates)} 个，"
-        f"超出 {config.exposure.max_per_unit} 次曝光的单元 {len(observation_duplicates)} 个"
+        f"超出 {config.exposure.max_per_unit} 次曝光的单元 {len(duplicate_units)} 个"
+        + ("（按同一时刻判重）" if snapshot_mode else "")
     )
     check = Check("exposure.duplicate", "重复曝光", status, summary, details)
     findings: list[Finding] = []
@@ -197,6 +224,9 @@ def assess_data_quality(
     config: ExperimentConfig,
     assignments: list[Assignment],
     observations: list[Observation],
+    *,
+    generated_at: datetime | None = None,
+    measurements: list[dict[str, object]] | None = None,
 ) -> tuple[Check, dict[str, object], list[Finding]]:
     primary_assignments = _primary_assignments(config, assignments)
     primary_observations = _primary_observations(config, observations)
@@ -216,24 +246,47 @@ def assess_data_quality(
         row.unit_id for row in primary_assignments
         if row.assigned_at < config.start or row.assigned_at > config.end
     )
+    tracked = measurements is not None and any(
+        item.get("outcome_horizon") is not None for item in measurements
+    )
+    as_of = generated_at or config.end
+    # 固定追踪窗允许在实验结束后才到齐的成熟结果：end 之后、run 之前到达的
+    # 观测是迟到报告（不是异常）。未配置 horizon 时保持旧口径：以 end 为界。
+    late_reports = sorted(
+        row.unit_id for row in primary_observations
+        if tracked and config.end < row.observed_at <= as_of
+    )
+    window_end = as_of if tracked else config.end
     observation_outside = sorted(
         row.unit_id for row in primary_observations
-        if row.observed_at < config.start or row.observed_at > config.end
+        if row.observed_at < config.start or row.observed_at > window_end
     )
     assigned_units = len(assignment_by_unit)
     coverage = len(observed_units) / assigned_units if assigned_units else 0.0
     structural = bool(unassigned or variant_mismatch)
     time_issue = bool(assignment_outside or observation_outside)
+    maturity_coverage = _primary_maturity_coverage(measurements)
+    primary_measure = _primary_measurement(measurements or [])
+    if tracked:
+        # 配置 horizon 后，pending cohort 尚未到应观察时间，不应拉低数据质量；
+        # 只有「已到应观察时间」的 cohort 才进入数据质量覆盖率分母。
+        mature = int(primary_measure.get("eligible_units", 0) or 0)
+        pending = int(primary_measure.get("pending_units", 0) or 0)
+        evaluable = int(primary_measure.get("denominator_units", 0) or 0) - pending
+        quality_coverage = mature / evaluable if evaluable else 1.0
+    else:
+        quality_coverage = coverage
     if structural or time_issue:
         status = "fail"
-    elif coverage < 0.9:
+    elif quality_coverage < 0.9:
         status = "warn"
     else:
         status = "pass"
-    details = {
+    details: dict[str, object] = {
         "assigned_units": assigned_units,
         "observed_units": len(observed_units),
         "observation_coverage": round(coverage, 8),
+        "coverage_for_flags": round(quality_coverage, 8),
         "unassigned_observation_units": len(unassigned),
         "variant_mismatch_units": len(variant_mismatch),
         "assignment_outside_window": len(assignment_outside),
@@ -243,6 +296,20 @@ def assess_data_quality(
             "variant_mismatch": variant_mismatch[:10],
         },
     }
+    if tracked:
+        # 全局 coverage 仍保留作输入完整性参考；成熟度覆盖率在
+        # measurement.maturity 检查与各指标结果中单独给出。
+        # data.quality 只嵌入紧凑汇总，完整 unit 明细在 audit.measurement。
+        details["measurement"] = [
+            {
+                key: value for key, value in dict(item).items() if key != "units"
+            }
+            for item in (measurements or [])
+        ]
+        details["measurement_tracked"] = True
+        details["maturity_coverage"] = maturity_coverage
+        details["late_report_units"] = len(late_reports)
+        details["sample_units"]["late_report"] = late_reports[:10]
     summary = (
         f"观测覆盖 {len(observed_units)}/{assigned_units} 个分配单元"
         f"（{coverage:.1%}），结构性异常 {len(unassigned) + len(variant_mismatch)} 个"
@@ -287,14 +354,213 @@ def assess_data_quality(
             )
         )
     if status == "warn":
+        if tracked:
+            detail = (
+                f"已到应观察时间的 cohort 中，成熟观测覆盖 "
+                f"{quality_coverage:.1%}，低于 90% 建议阈值；"
+                "等待中的 cohort 不计入该分母。"
+            )
+        else:
+            detail = f"观测覆盖率 {coverage:.1%}，低于 90% 建议阈值。"
         findings.append(
             Finding(
                 code="data.low_coverage",
                 severity="medium",
                 category="data",
                 title="观测覆盖率偏低",
-                detail=f"观测覆盖率 {coverage:.1%}，低于 90% 建议阈值。",
+                detail=detail,
                 evidence=details,
+            )
+        )
+    return check, details, findings
+
+
+def _primary_measurement(measurements: list[dict[str, object]]) -> dict[str, object]:
+    for item in measurements:
+        if item.get("role") == "primary":
+            return item
+    return {}
+
+
+def _primary_maturity_coverage(
+    measurements: list[dict[str, object]] | None,
+) -> float | None:
+    if not measurements:
+        return None
+    primary = _primary_measurement(measurements)
+    if primary.get("outcome_horizon") is None:
+        return None
+    return float(primary.get("measurement_coverage", 0.0))
+
+
+def assess_measurement_quality(
+    config: ExperimentConfig,
+    measurements: list[dict[str, object]],
+) -> tuple[Check, dict[str, object], list[Finding]]:
+    """逐指标汇总成熟度 cohort，生成 pending / incomplete 证据。
+
+    只统计配置了 ``outcome_horizon`` 的指标；没有 horizon 时调用方不应调用本函数。
+    """
+    tracked = [
+        item for item in measurements if item.get("outcome_horizon") is not None
+    ]
+    primary = _primary_measurement(measurements) if tracked else {}
+    if primary.get("outcome_horizon") is None:
+        # 主指标没有 horizon 时，不应把它的旧口径字段混入成熟度证据。
+        primary = {}
+    pending_primary = int(primary.get("pending_units", 0) or 0)
+    missing_primary = int(primary.get("mature_but_missing_units", 0) or 0)
+    early_primary = int(primary.get("observed_before_horizon_units", 0) or 0)
+    pending_any = sum(int(item.get("pending_units", 0) or 0) for item in tracked)
+    missing_any = sum(
+        int(item.get("mature_but_missing_units", 0) or 0)
+        + int(item.get("observed_before_horizon_units", 0) or 0)
+        for item in tracked
+    )
+    if pending_primary:
+        status = "warn"
+    elif missing_primary or early_primary:
+        status = "warn"
+    elif pending_any or missing_any:
+        status = "warn"
+    else:
+        status = "pass"
+    metric_details = [
+        {
+            "metric_key": item.get("metric_key"),
+            "label": item.get("label"),
+            "role": item.get("role"),
+            "outcome_horizon": item.get("outcome_horizon"),
+            "status": item.get("status"),
+            "denominator_units": item.get("denominator_units", 0),
+            "eligible_units": item.get("eligible_units", 0),
+            "measurement_coverage": item.get("measurement_coverage", 0.0),
+            "pending_units": item.get("pending_units", 0),
+            "mature_but_missing_units": item.get("mature_but_missing_units", 0),
+            "observed_before_horizon_units": item.get(
+                "observed_before_horizon_units", 0
+            ),
+            "eligible_units_by_variant": item.get("eligible_units_by_variant", {}),
+            "denominator_units_by_variant": item.get(
+                "denominator_units_by_variant", {}
+            ),
+            "pending_cohorts": item.get("pending_cohorts", []),
+            "as_of": item.get("as_of"),
+        }
+        for item in tracked
+    ]
+    details: dict[str, object] = {
+        "tracked_metrics": len(tracked),
+        "primary_metric": primary.get("metric_key") if tracked else None,
+        "primary_status": primary.get("status") if tracked else "legacy",
+        "primary_pending_units": pending_primary,
+        "primary_mature_but_missing_units": missing_primary,
+        "primary_observed_before_horizon_units": early_primary,
+        "pending_units": pending_any,
+        "incomplete_units": missing_any,
+        "metrics": metric_details,
+        # 逐指标紧凑汇总，避免检查 details 里重复嵌入 unit 明细。
+        "metric_summaries": [
+            {
+                key: value for key, value in dict(item).items()
+                if key != "units"
+            }
+            for item in tracked
+        ],
+    }
+    if primary:
+        summary = (
+            f"主指标 {primary.get('metric_key')} 等待成熟 {pending_primary} 个 unit，"
+            f"成熟缺数 {missing_primary} 个，成熟覆盖率 "
+            f"{float(primary.get('measurement_coverage', 0.0)):.1%}"
+        )
+    elif tracked:
+        summary = (
+            f"{len(tracked)} 个指标配置了 outcome_horizon，"
+            f"等待中 {pending_any} 个 unit，成熟缺数 {missing_any} 个"
+        )
+    else:
+        summary = "未配置 outcome_horizon，沿用全部观测口径"
+    check = Check("measurement.maturity", "结果成熟度", status, summary, details)
+    findings: list[Finding] = []
+    if tracked and pending_any:
+        pending_metric_keys = [
+            item.get("metric_key") for item in tracked
+            if int(item.get("pending_units", 0) or 0) > 0
+        ]
+        pending_summary = "；".join(
+            f"{item.get('label')} {int(item.get('pending_units', 0) or 0)}"
+            for item in tracked
+            if int(item.get("pending_units", 0) or 0) > 0
+        )
+        findings.append(
+            Finding(
+                code="measurement_pending",
+                severity="medium",
+                category="measurement",
+                title="存在尚未成熟的结果 cohort",
+                detail=(
+                    f"按各指标自己的 horizon，等待中的 unit：{pending_summary}。"
+                    "这些结果不计为零、也不写成永久缺数；"
+                    "当前效应只代表成熟子样本，主指标仍有 pending 时决策只能是 provisional。"
+                ),
+                evidence={
+                    "pending_units_by_metric": {
+                        item.get("metric_key"): int(
+                            item.get("pending_units", 0) or 0
+                        )
+                        for item in tracked
+                    },
+                    "metric_keys": pending_metric_keys,
+                    "primary_pending_units": pending_primary,
+                    "primary_pending_cohorts": (
+                        primary.get("pending_cohorts", []) if pending_primary else []
+                    ),
+                },
+            )
+        )
+    if tracked and (missing_any or early_primary):
+        incomplete_by_metric = "；".join(
+            f"{item.get('label')} 缺数 {int(item.get('mature_but_missing_units', 0) or 0)}、"
+            f"早于窗口 {int(item.get('observed_before_horizon_units', 0) or 0)}"
+            for item in tracked
+            if int(item.get("mature_but_missing_units", 0) or 0)
+            or int(item.get("observed_before_horizon_units", 0) or 0)
+        )
+        findings.append(
+            Finding(
+                code="measurement_incomplete",
+                severity="medium",
+                category="measurement",
+                title="成熟结果不完整",
+                detail=(
+                    f"{incomplete_by_metric}。"
+                    "成熟后仍缺数属于真实的观测流失（attrition），"
+                    "不应与等待中的 cohort 混为一谈。"
+                ),
+                evidence={
+                    "primary_mature_but_missing_units": missing_primary,
+                    "primary_observed_before_horizon_units": early_primary,
+                    "incomplete_by_metric": {
+                        item.get("metric_key"): {
+                            "mature_but_missing_units": int(
+                                item.get("mature_but_missing_units", 0) or 0
+                            ),
+                            "observed_before_horizon_units": int(
+                                item.get("observed_before_horizon_units", 0) or 0
+                            ),
+                        }
+                        for item in tracked
+                    },
+                    "metrics": metric_details,
+                    "metric_summaries": [
+                        {
+                            key: value for key, value in dict(item).items()
+                            if key != "units"
+                        }
+                        for item in tracked
+                    ],
+                },
             )
         )
     return check, details, findings

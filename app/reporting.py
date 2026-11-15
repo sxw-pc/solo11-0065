@@ -10,7 +10,12 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .models import CHECK_LABELS, DECISION_LABELS, SEVERITY_LABELS
+from .models import (
+    CHECK_LABELS,
+    DECISION_LABELS,
+    MEASUREMENT_STATUS_LABELS,
+    SEVERITY_LABELS,
+)
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 ARTIFACTS = ("audit.json", "decision_card.json", "report.md", "report.html")
@@ -46,20 +51,28 @@ def _environment() -> Environment:
         "severity": lambda key: SEVERITY_LABELS.get(key, key),
         "check_status": lambda key: CHECK_LABELS.get(key, key),
         "decision_label": lambda key: DECISION_LABELS.get(key, key),
+        "measurement_status": lambda key: MEASUREMENT_STATUS_LABELS.get(key, key),
     })
     return env
 
 
 def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
     primary = result["metrics"]["primary"]
+    measurement = result.get("measurement") or {}
     return {
         "run_id": result["run"]["run_id"],
         "generated_at": result["run"]["generated_at"],
+        "provisional": result["run"].get("provisional", False),
         "experiment": result["experiment"]["experiment"],
         "decision": result["decision"],
         "headline": result["headline"],
         "primary_metric": primary,
         "guardrails": result["metrics"]["guardrails"],
+        "measurement": {
+            "tracked": measurement.get("tracked", False),
+            "primary": measurement.get("primary"),
+            "check_status": measurement.get("check_status"),
+        },
         "checks": [
             {"code": check["code"], "status": check["status"], "summary": check["summary"]}
             for check in result["checks"]
@@ -67,6 +80,78 @@ def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
         "findings": result["findings"],
         "input_digest": result["run"]["input_digest"],
     }
+
+
+def _cohort_status(raw: Any) -> str:
+    label = MEASUREMENT_STATUS_LABELS.get(str(raw))
+    return f"{label}（{raw}）" if label else str(raw)
+
+
+def _measurement_lines(result: dict[str, Any]) -> list[str]:
+    measurement = result.get("measurement") or {}
+    metrics = measurement.get("metrics") or []
+    tracked = [item for item in metrics if item.get("outcome_horizon") is not None]
+    lines = ["## 结果成熟期", ""]
+    if not tracked:
+        lines.append("未配置 `outcome_horizon`，沿用旧行为：全部观测参与指标计算。")
+        lines.append("")
+        return lines
+    lines.extend(
+        [
+            f"- 判定基准：run.generated_at = `{result['run'].get('measurement_as_of', '')}`",
+            "- 口径：每个 unit 自 `assigned_at` 起的固定追踪窗，成熟时点含边界。",
+            "",
+            "| 指标 | 角色 | horizon | 分母 | 成熟 | 等待(pending) | 成熟缺数 | 早于窗口 | 成熟覆盖 | 状态 |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for item in tracked:
+        lines.append(
+            f"| {item.get('label')} | {item.get('role')} | "
+            f"{item.get('outcome_horizon')}d | {item.get('denominator_units', 0)} | "
+            f"{item.get('eligible_units', 0)} | {item.get('pending_units', 0)} | "
+            f"{item.get('mature_but_missing_units', 0)} | "
+            f"{item.get('observed_before_horizon_units', 0)} | "
+            f"{fmt_pct(float(item.get('measurement_coverage', 0.0) or 0.0), 1)} | "
+            f"{_cohort_status(item.get('status'))} |"
+        )
+    primary = measurement.get("primary") or {}
+    cohorts = primary.get("pending_cohorts") or []
+    if cohorts:
+        lines.extend(["", "### 等待中的 cohort（主指标）", ""])
+        lines.append("| 入组日 | 成熟时点 | units | 分臂 |")
+        lines.append("| --- | --- | ---: | --- |")
+        for cohort in cohorts:
+            by_variant = ", ".join(
+                f"{key}={value}" for key, value in sorted(
+                    (cohort.get("by_variant") or {}).items()
+                )
+            )
+            mature_at = cohort.get("mature_at")
+            if cohort.get("mature_at_latest"):
+                mature_at = f"{mature_at} → {cohort['mature_at_latest']}"
+            lines.append(
+                f"| {cohort.get('assigned_date')} | {mature_at} | "
+                f"{cohort.get('units')} | {by_variant} |"
+            )
+    if result["run"].get("provisional"):
+        lines.extend(
+            [
+                "",
+                "> **provisional**：主指标仍有 pending cohort，"
+                "当前效应只代表成熟子样本，不能作为最终上线结论。",
+            ]
+        )
+    missing = [
+        (item.get("label"), item.get("mature_but_missing_units"))
+        for item in tracked if item.get("mature_but_missing_units")
+    ]
+    if missing:
+        lines.extend(["", "### 成熟缺数（attrition）", ""])
+        for label, count in missing:
+            lines.append(f"- {label}：{count} 个 unit 已过成熟时点但仍无可用观测。")
+    lines.append("")
+    return lines
 
 
 def render_markdown(result: dict[str, Any]) -> str:
@@ -97,16 +182,28 @@ def render_markdown(result: dict[str, Any]) -> str:
     ]
     metric_rows = [primary, *result["metrics"]["secondary"], *result["metrics"]["guardrails"]]
     for item in metric_rows:
+        computed = item.get("computed", True)
         state = "显著" if item["significant"] else "不显著"
+        if not computed:
+            state = "成熟观察不足"
         if item["role"] == "guardrail":
-            state = {"breach": "越界", "watch": "临界", "ok": "正常", "n/a": "—"}[
+            state = {"breach": "越界", "watch": "临界", "ok": "正常",
+                     "pending": "成熟度不足", "n/a": "—"}[
                 item["guardrail_status"]
             ]
+        control_value = fmt_num(item["control_value"]) if computed else "—"
+        treatment_value = fmt_num(item["treatment_value"]) if computed else "—"
+        effect = fmt_num(item["absolute_effect"]) if computed else "—"
+        interval = (
+            f"[{fmt_num(item['ci_low'])}, {fmt_num(item['ci_high'])}]"
+            if computed else "—"
+        )
+        p_value = fmt_p(item["p_value"]) if computed else "—"
         lines.append(
-            f"| {item['label']} | {item['role']} | {fmt_num(item['control_value'])} "
-            f"| {fmt_num(item['treatment_value'])} | {fmt_num(item['absolute_effect'])} "
-            f"| [{fmt_num(item['ci_low'])}, {fmt_num(item['ci_high'])}] "
-            f"| {fmt_p(item['p_value'])} | {state} |"
+            f"| {item['label']} | {item['role']} | {control_value} "
+            f"| {treatment_value} | {effect} "
+            f"| {interval} "
+            f"| {p_value} | {state} |"
         )
     lines.extend(["", "## 自动检查", "", "| 检查 | 状态 | 摘要 |", "| --- | --- | --- |"])
     for check in result["checks"]:
@@ -114,6 +211,8 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"| {check['label']} | {CHECK_LABELS.get(check['status'], check['status'])} "
             f"| {check['summary']} |"
         )
+    lines.extend([""])
+    lines.extend(_measurement_lines(result))
     lines.extend(["", "## Findings", ""])
     if not result["findings"]:
         lines.append("未发现需要关注的问题。")
@@ -162,6 +261,7 @@ def render_html(result: dict[str, Any]) -> str:
         ),
         CHECK_LABELS=CHECK_LABELS,
         SEVERITY_LABELS=SEVERITY_LABELS,
+        MEASUREMENT_STATUS_LABELS=MEASUREMENT_STATUS_LABELS,
     )
     return _compact_html(rendered)
 
