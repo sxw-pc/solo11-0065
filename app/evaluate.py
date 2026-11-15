@@ -197,6 +197,7 @@ def build_flags(
         "no_duplicate_exposure": exposure.status == "pass",
         "mutex_conflict": mutex.status == "fail",
         "no_mutex_conflict": mutex.status == "pass",
+        "mutex_membership_unknown": mutex.status == "warn",
         "data_quality_ok": quality.status == "pass",
         "data_quality_warning": quality.status == "warn",
         "data_quality_failed": quality.status == "fail",

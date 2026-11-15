@@ -7,7 +7,7 @@
 | 文件 | 内容 |
 | --- | --- |
 | `experiment.yaml` | 实验定义、指标、护栏、分层与声明式决策规则 |
-| `assignments.csv` | 1600 条分配记录，含平台与区域分层字段 |
+| `assignments.csv` | 1600 条本实验分配记录 + 6 条互斥实验历史记录，含平台与区域分层字段 |
 | `observations.csv` | 1600 条曝光观测，含激活、会话深度、崩溃字段 |
 
 生成方式：固定种子 `20260301` 的本地脚本离线生成；脚本不随运行期使用，项目运行时只读取 CSV/YAML。
@@ -19,9 +19,10 @@
 | 列 | 类型 | 说明 |
 | --- | --- | --- |
 | `unit_id` | string | `unit-0001` 至 `unit-1600` |
-| `experiment_id` | string | 固定为 `exp-onboarding-card-2026` |
+| `experiment_id` | string | `exp-onboarding-card-2026`；另有 6 行为互斥实验 `exp-checkout-copy-2026` |
 | `variant` | string | `control` / `treatment` |
 | `assigned_at` | ISO-8601 | 2026-03-01 至 2026-03-11 的 UTC 时间 |
+| `ended_at` | ISO-8601 或空 | 参与结束时刻；本实验行留空（仍活动），互斥实验 6 行均为 2026-02 的 09:30（窗口前已结束） |
 | `platform` | string | `desktop` / `mobile` / `legacy` |
 | `region` | string | `north` / `south` / `west` |
 
@@ -46,7 +47,7 @@
 3. 护栏临界：崩溃率 1.0% → 1.75%，劣化 0.75pp，低于 1.0pp 阈值但超过阈值一半。
 4. `legacy` 平台方向反转：激活率 33.3% → 10.0%，样本各 120，显著为负。
 5. 总体同向分层占比不足 75%，因此主指标稳健性为 false。
-6. 没有重复曝光、互斥冲突或结构性数据质量问题。
+6. 没有重复曝光、互斥冲突（6 条互斥实验历史参与均在窗口前结束，判定为 clear）或结构性数据质量问题。
 
 ## 期望结果
 

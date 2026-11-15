@@ -277,7 +277,20 @@ decision:
 | `platform` | 分层字段示例，按配置字段要求 |
 | `region` | 分层字段示例，按配置字段要求 |
 
+可选列：
+
+| 列 | 说明 |
+| --- | --- |
+| `ended_at` | ISO-8601 参与结束时刻；空值表示仍活动；整列缺失表示旧格式，结束时刻未知 |
+
 允许同一 `unit_id` 出现在其他实验的分配行中，用于互斥冲突检查。
+
+#### 参与区间协议（互斥检查使用）
+
+- 每条分配记录定义半开活动区间 `[assigned_at, ended_at)`；空 `ended_at` 是开口区间（仍活动）。
+- 同一 `(experiment_id, unit_id)` 的多条记录先按 `assigned_at` 排序再合并：后续分配会闭合前一段开口区间（同一 unit 不能同时持有两段分配，推导出的结束时刻视为已知）；同一时刻的记录取并集，开口记录优先；相接或相交的区间合并为一段。合并结果与 CSV 行序无关。
+- `ended_at < assigned_at` 是非法区间，载入时拒绝并给出文件名与行号；`ended_at == assigned_at` 是零长度区间，不产生任何重叠。
+- 旧 CSV 没有 `ended_at` 列时，时间信息不足以证明参与已结束：相关 unit 标记为 `membership_unknown`——阻断可上线结论（决策转人工复核），但不伪称存在实际重叠，报告也不会把未知写成 clear。仅凭 `assigned_at` 晚于本实验窗口即可证明不相交的记录仍判定为 clear。
 
 ### 观测 CSV
 
@@ -309,7 +322,7 @@ decision:
 | --- | --- | --- |
 | `split.balance` | 分流比例失衡 | 比例偏差超过 `tolerance`，或卡方 p 值异常 |
 | `exposure.duplicate` | 重复分配 / 重复曝光 | 单 unit 次数超过 `max_per_unit` 且额外次数超过 `tolerance` |
-| `mutex.conflict` | 互斥实验冲突 | 本实验 unit 也出现在声明的互斥实验分配中 |
+| `mutex.conflict` | 互斥实验冲突 | 本实验 unit 在互斥实验的活动区间与本实验窗口相交；旧数据无法确认时标记 `mutex.membership_unknown` |
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
 | `sample.size` | 每组样本不足 | 每组唯一观测单元少于 `ceil(min_assignments / 2)` |
 | `metric.primary` | 主指标证据 | 负向显著为 fail；稳健通过为 pass；其他为 warn |
@@ -324,6 +337,16 @@ decision:
 - 计算每个变体的观测占比与期望占比的绝对偏差。
 - 用卡方拟合优度检验（`k-1` 自由度）给出总体 p 值。
 - 任一变体偏差超过配置容差即失败；未超过容差但卡方 p 值低于 `0.05` 时告警。
+
+### 互斥参与区间
+
+互斥检查不按“unit 是否出现”判定，而是把每个 `(experiment_id, unit_id)` 的分配记录按上文的参与区间协议合并为活动区间，只在区间与本实验窗口 `[start, end]` 相交时判定冲突。结论分三态：
+
+- **conflict**（critical）：活动区间与窗口相交。finding 证据给出冲突 unit、两个实验标识、交集起止与源 CSV 行号。
+- **unknown**（high）：旧 CSV 缺少 `ended_at` 列，无法证明参与未重叠。阻断可上线结论，但不判定存在实际重叠。
+- **clear**：可证明不相交（已结束或尚未开始），不产生 finding。
+
+例：互斥实验 X 的 unit-0042 参与区间为 09:00–09:30，本实验窗口 10:00–12:00 → clear，不报冲突；若该 unit 在 10:30 仍活动（开口区间）→ conflict，交集为 `[10:30, 12:00]`。
 
 ### 统计推断
 
@@ -428,6 +451,7 @@ when:
 | `split_balanced` / `split_imbalanced` | 分流检查通过 / 未通过 |
 | `no_duplicate_exposure` / `duplicate_exposure` | 无重复曝光 / 有重复曝光 |
 | `no_mutex_conflict` / `mutex_conflict` | 无互斥冲突 / 有互斥冲突 |
+| `mutex_membership_unknown` | 旧数据缺少 `ended_at`，互斥参与区间无法确认 |
 | `data_quality_ok` | 数据一致性检查为 pass |
 | `data_quality_warning` / `data_quality_failed` | 数据质量为 warn / fail |
 | `coverage_ok` | 观测覆盖率至少 90% 且无结构性异常 |
@@ -513,7 +537,7 @@ python -m app serve --port 5000
 - 主指标：激活率；对照 `200/800=25.0%`，实验 `240/800=30.0%`，绝对效应 `+5.0pp`，p≈`0.0251`。
 - 护栏：崩溃率；对照 `8/800=1.0%`，实验 `14/800=1.75%`，劣化 `0.75pp`，未超过 `1.0pp` 阈值，但进入 `watch`。
 - 分层：`legacy` 平台对照 `40/120`、实验 `12/120`，方向显著为负，形成总体正、局部分层负的方向反转。
-- 互斥实验：配置了 `exp-checkout-copy-2026`，样例中没有冲突。
+- 互斥实验：配置了 `exp-checkout-copy-2026`；`assignments.csv` 含 6 条该实验的历史参与记录（`ended_at` 均在本实验窗口之前），用于演示区间判定为 clear 而非误报冲突。
 - 重复曝光：样例中没有重复。
 
 因此演示决策为 **继续迭代（iterate）**，命中 `iterate-evidence`，同时产生：

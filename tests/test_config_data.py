@@ -57,7 +57,18 @@ def test_config_rejects_bad_rule_condition(tmp_path):
 def test_dataset_loads_expected_fixture(config):
     assignments = load_assignments(ASSIGNMENTS_PATH, config)
     observations = load_observations(OBSERVATIONS_PATH, config)
-    assert len(assignments) == 1600
+    primary = [row for row in assignments if row.experiment_id == config.experiment_id]
+    historical = [
+        row for row in assignments
+        if row.experiment_id == config.mutexes[0].experiment_id
+    ]
+    assert len(assignments) == 1606
+    assert len(primary) == 1600
+    assert len(historical) == 6
+    assert all(row.ended_at_known for row in assignments)
+    assert all(row.ended_at is None for row in primary)
+    assert all(row.ended_at is not None for row in historical)
+    assert all(row.source_line is not None for row in assignments)
     assert len(observations) == 1600
     assert {row.unit_id for row in assignments} == {
         row.unit_id for row in observations

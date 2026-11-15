@@ -133,6 +133,12 @@ class Assignment:
     variant: str
     assigned_at: datetime
     strata: dict[str, str]
+    # 参与结束时刻。None 且 ended_at_known 为 True 表示开口区间（仍活动）；
+    # ended_at_known 为 False 表示旧 CSV 缺少 ended_at 列，结束时刻未知。
+    ended_at: datetime | None = None
+    ended_at_known: bool = True
+    # 源 CSV 行号（表头为第 1 行，数据从第 2 行起），用于 finding 证据定位。
+    source_line: int | None = None
 
 
 @dataclass(frozen=True)

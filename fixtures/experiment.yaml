@@ -91,12 +91,13 @@ decision:
     - id: review-data-integrity
       card: review
       priority: 120
-      reason: 分流比例、重复曝光、互斥冲突或数据一致性未通过，先复核数据。
+      reason: 分流比例、重复曝光、互斥冲突（含参与区间未知）或数据一致性未通过，先复核数据。
       when:
         any:
           - flag: split_imbalanced
           - flag: duplicate_exposure
           - flag: mutex_conflict
+          - flag: mutex_membership_unknown
           - flag: data_quality_failed
     - id: review-data-warning
       card: review

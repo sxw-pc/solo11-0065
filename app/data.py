@@ -37,7 +37,7 @@ def _parse_time(value: str, path: str, line: int) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _rows(path: Path, required: Iterable[str]) -> list[dict[str, str]]:
+def _rows(path: Path, required: Iterable[str]) -> tuple[list[dict[str, str]], tuple[str, ...]]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -50,7 +50,7 @@ def _rows(path: Path, required: Iterable[str]) -> list[dict[str, str]]:
         raise DataValidationError(f"无法读取 {path.name}: {exc}") from exc
     if not rows:
         raise DataValidationError(f"{path.name} 没有数据行")
-    return rows
+    return rows, headers
 
 
 def _metric_value(raw: str, kind: str, path: str, line: int, column: str) -> float:
@@ -67,7 +67,10 @@ def _metric_value(raw: str, kind: str, path: str, line: int, column: str) -> flo
 
 def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
     strata_fields = list(config.stratification.fields)
-    rows = _rows(path, (*BASE_ASSIGNMENT_COLUMNS, *strata_fields))
+    rows, headers = _rows(path, (*BASE_ASSIGNMENT_COLUMNS, *strata_fields))
+    # ended_at 是可选列：整列缺失视为旧格式，所有记录的结束时刻未知
+    # （ended_at_known=False），互斥检查按 membership_unknown 策略处理。
+    has_ended_at = "ended_at" in headers
     variant_keys = {variant.key for variant in config.variants}
     assignments: list[Assignment] = []
     for index, row in enumerate(rows, start=2):
@@ -86,6 +89,17 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
             )
         if not variant:
             raise DataValidationError(f"{path.name}:{index} variant 不能为空")
+        assigned_at = _parse_time(row["assigned_at"], path.name, index)
+        ended_at = None
+        if has_ended_at:
+            raw_ended = (row.get("ended_at") or "").strip()
+            if raw_ended:
+                ended_at = _parse_time(raw_ended, path.name, index)
+                if ended_at < assigned_at:
+                    raise DataValidationError(
+                        f"{path.name}:{index} ended_at 早于 assigned_at，"
+                        "参与区间非法"
+                    )
         strata: dict[str, str] = {}
         for field in strata_fields:
             value = (row.get(field) or "").strip()
@@ -99,8 +113,11 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
                 unit_id=unit_id,
                 experiment_id=experiment_id,
                 variant=variant,
-                assigned_at=_parse_time(row["assigned_at"], path.name, index),
+                assigned_at=assigned_at,
                 strata=strata,
+                ended_at=ended_at,
+                ended_at_known=has_ended_at,
+                source_line=index,
             )
         )
     return assignments
@@ -109,7 +126,7 @@ def load_assignments(path: Path, config: ExperimentConfig) -> list[Assignment]:
 def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]:
     specs = (config.primary, *config.secondary, *config.guardrails)
     columns = [spec.column for spec in specs]
-    rows = _rows(path, (*BASE_OBSERVATION_COLUMNS, *columns))
+    rows, _ = _rows(path, (*BASE_OBSERVATION_COLUMNS, *columns))
     variant_keys = {variant.key for variant in config.variants}
     observations: list[Observation] = []
     for index, row in enumerate(rows, start=2):

@@ -161,6 +161,7 @@ def run_audit(
         "duplicate_assignment_units": exposure_details["duplicate_assignment_units"],
         "duplicate_exposure_units": exposure_details["duplicate_exposure_units"],
         "mutex_conflict_units": mutex_details["conflict_units"],
+        "mutex_unknown_units": mutex_details["unknown_units"],
         "observation_coverage": quality_details["observation_coverage"],
     }
     return {
