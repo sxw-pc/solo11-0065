@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from app import ledger
 from app.decision import decide, evaluate_condition, referenced_flags
@@ -70,7 +69,7 @@ def test_markdown_contains_all_metric_roles(audit_result):
 
 def test_ledger_round_trip(audit_result, tmp_path):
     db = tmp_path / "data" / "ledger.sqlite3"
-    ledger.save_run(db, audit_result, "out/run-test-00000001")
+    payload1 = ledger.save_run(db, audit_result, "out/run-test-00000001")
     ledger.save_run(db, audit_result, "out/run-test-00000001")
     assert ledger.count_runs(db) == 1
     runs = ledger.list_runs(db)
@@ -82,3 +81,46 @@ def test_ledger_round_trip(audit_result, tmp_path):
     assert ledger.list_runs(db, decision="ship") == []
     assert ledger.get_run(db, "run-does-not-exist") is None
     assert ledger.get_run(db, "../escape") is None
+    # save_run 返回的生命周期载荷与台账详情一致
+    assert payload1["comparison_status"] == "no_baseline"
+    assert {entry["status"] for entry in detail["lifecycle"]["entries"]} == {"new"}
+    assert all(entry["finding_key"] for entry in detail["lifecycle"]["entries"])
+
+
+def test_report_renders_lifecycle_sections(audit_result, tmp_path):
+    import copy
+
+    from app.reporting import decision_card_payload
+
+    db = tmp_path / "ledger.sqlite3"
+    first = copy.deepcopy(audit_result)
+    first["run"]["run_id"] = "run-rpt-000000001"
+    first["run"]["generated_at"] = "2026-03-01T00:00:00+00:00"
+    second = copy.deepcopy(audit_result)
+    second["run"]["run_id"] = "run-rpt-000000002"
+    second["run"]["generated_at"] = "2026-03-02T00:00:00+00:00"
+    ledger.save_run(db, first, "out/1")
+    second["lifecycle"] = ledger.save_run(db, second, "out/2")
+
+    markdown = render_markdown(second)
+    assert "## Finding 生命周期" in markdown
+    assert "持续存在" in markdown
+    assert "run-rpt-000000001" in markdown
+    html = render_html(second)
+    assert "Finding 生命周期（跨运行）" in html
+    assert "持续存在" in html
+    assert len(html.splitlines()) <= 300
+    card = decision_card_payload(second)
+    assert card["lifecycle"]["baseline_run_id"] == "run-rpt-000000001"
+    written = write_artifacts(second, tmp_path / "report2")
+    audit_json = json.loads(written["audit.json"].read_text(encoding="utf-8"))
+    assert audit_json["lifecycle"]["entries"]
+    assert audit_json["findings"][0]["finding_key"]
+
+
+def test_report_without_lifecycle_remains_readable(audit_result):
+    # 未写台账的纯内存结果（如旧测试夹具）也能正常渲染
+    markdown = render_markdown(audit_result)
+    assert "无比较基准" in markdown or "Finding 生命周期" in markdown
+    html = render_html(audit_result)
+    assert "分流验台" in html

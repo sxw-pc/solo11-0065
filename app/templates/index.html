@@ -70,6 +70,7 @@
         <th class="num">主指标效应</th>
         <th class="num">p 值</th>
         <th class="num">Finding</th>
+        <th>比较基准</th>
         <th>生成时间</th>
         <th></th>
       </tr>
@@ -85,6 +86,17 @@
         <td class="num">{{ "%+.4f"|format(row.primary_effect) }}</td>
         <td class="num">{{ row.primary_p_value|pval }}</td>
         <td class="num">{{ row.finding_count }}</td>
+        <td>
+          {% if row.baseline_run_id %}
+          <a class="mono-sub" href="{{ url_for('run_detail', run_id=row.baseline_run_id) }}">{{ row.baseline_run_id[-12:] }}</a>
+          {% elif row.comparison_status == "incomparable" %}
+          <span class="status neutral">配置变化·不可比</span>
+          {% elif row.comparison_status == "legacy_no_identity" %}
+          <span class="status neutral">历史无身份</span>
+          {% else %}
+          <span class="status neutral">无基准</span>
+          {% endif %}
+        </td>
         <td class="time">{{ row.generated_at.replace("T", " ")[:19] }}</td>
         <td class="row-actions">
           <a href="{{ url_for('run_detail', run_id=row.run_id) }}">详情</a>

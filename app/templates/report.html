@@ -201,16 +201,37 @@
     {% if result.findings %}
     <div class="findings">
       {% for finding in result.findings %}
+      {% set entry = lifecycle_map.get(finding.finding_key) %}
       <article class="finding">
         <span class="badge {{ finding.severity }}">{{ SEVERITY_LABELS.get(finding.severity, finding.severity) }}</span>
+        {% if entry %}<span class="badge {{ 'pass' if entry.status == 'resolved' else ('warn' if entry.status == 'continuing' else 'fail') }}">{{ entry.status|lifecycle }}{% if entry.reappeared %}·重现{% elif entry.evidence_changed %}·证据更新{% endif %}</span>{% endif %}
         <h3>{{ finding.title }}</h3>
         <p>{{ finding.detail }}</p>
-        <div class="finding-code">{{ finding.code }} · {{ finding.category }}</div>
+        <div class="finding-code">{{ finding.code }} · {{ finding.category }} · key {{ finding.finding_key }}</div>
       </article>
       {% endfor %}
     </div>
     {% else %}
     <div class="empty">未发现需要关注的问题。</div>
+    {% endif %}
+
+    {% if result.lifecycle %}
+    <h2>Finding 生命周期（跨运行）</h2>
+    {% if result.lifecycle.comparison_status == "legacy_no_identity" %}
+    <div class="empty">历史 run 的 finding 缺少稳定身份，无比较基准，仅保持原始可读。</div>
+    {% elif not result.lifecycle.entries and not result.lifecycle.resolved %}
+    <div class="empty">{% if result.lifecycle.comparison_status == "incomparable" %}历史 run 配置 digest 不同，本次 finding 按新出现处理，不跨配置比较。{% else %}同 experiment 暂无更早的成功 run，本次 finding 均为首次记录。{% endif %}</div>
+    {% else %}
+    {% if result.lifecycle.baseline_run_id %}<p>比较基准：同 config_digest 最近成功 run <code>{{ result.lifecycle.baseline_run_id }}</code>{% if result.lifecycle.skipped_run_count %}，跨过 {{ result.lifecycle.skipped_run_count }} 个配置不同的 run{% endif %}。</p>{% elif result.lifecycle.comparison_status == "incomparable" %}<p>无同 config_digest 历史 run（紧邻 run <code>{{ result.lifecycle.immediate_run_id }}</code> 配置不同），本次 finding 按新出现处理。</p>{% endif %}
+    <div class="scroll"><table>
+      <thead><tr><th>Finding</th><th>业务键</th><th>状态</th><th>证据变化</th><th>重现</th><th>跨配置</th><th>上一次出现</th><th>首次出现</th></tr></thead>
+      <tbody>
+        {% for entry in result.lifecycle.entries + result.lifecycle.resolved %}
+        <tr><td>{{ entry.code }}</td><td class="finding-code">{{ entry.finding_key }}</td><td><span class="badge {{ 'pass' if entry.status == 'resolved' else ('warn' if entry.status == 'continuing' else 'fail') }}">{{ entry.status|lifecycle }}</span></td><td>{{ "是" if entry.evidence_changed else "否" }}</td><td>{{ "是" if entry.reappeared else "否" }}</td><td>{{ "是" if entry.cross_config_gap else "否" }}</td><td class="finding-code">{{ entry.previous_run_id or "—" }}</td><td class="finding-code">{{ entry.first_seen_run_id }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    {% endif %}
     {% endif %}
 
     <h2>分层复核</h2>

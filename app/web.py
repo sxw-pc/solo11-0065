@@ -9,6 +9,7 @@ from typing import Any
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
 from . import ledger
+from .lifecycle import LIFECYCLE_LABELS
 from .models import CHECK_LABELS, DECISION_LABELS, SEVERITY_LABELS
 from .reporting import ARTIFACTS, fmt_num, fmt_p, fmt_pct
 from .safety import PathSecurityError, resolve_under
@@ -63,6 +64,7 @@ def create_app(
             "DECISION_LABELS": DECISION_LABELS,
             "SEVERITY_LABELS": SEVERITY_LABELS,
             "CHECK_LABELS": CHECK_LABELS,
+            "LIFECYCLE_LABELS": LIFECYCLE_LABELS,
         }
 
     @app.get("/")
@@ -101,7 +103,20 @@ def create_app(
             )
         except (PathSecurityError, OSError) as exc:
             abort(404, description=f"审计产物不可读取：{exc}")
-        return render_template("run.html", row=row, result=_load_audit(artifact_path))
+        result = _load_audit(artifact_path)
+        # 台账中的生命周期关系是权威来源（旧产物可能缺少该段）。
+        result["lifecycle"] = row.get("lifecycle")
+        return render_template("run.html", row=row, result=result)
+
+    @app.get("/runs/<run_id>/findings/<finding_key>")
+    def finding_history(run_id: str, finding_key: str) -> str:
+        row = _run_row(run_id)
+        history = ledger.get_finding_history(ledger_path, run_id, finding_key)
+        if not history:
+            abort(404, description="台账中没有该 finding 的跨运行记录")
+        return render_template(
+            "finding_history.html", row=row, finding_key=finding_key, history=history
+        )
 
     @app.get("/runs/<run_id>/artifacts/<name>")
     def artifact(run_id: str, name: str) -> Any:
@@ -135,6 +150,8 @@ def create_app(
                     "headline": row["headline"],
                     "finding_count": row["finding_count"],
                     "input_digest": row["input_digest"],
+                    "baseline_run_id": row["baseline_run_id"],
+                    "comparison_status": row["comparison_status"],
                 }
                 for row in runs
             ]
@@ -142,14 +159,24 @@ def create_app(
 
     @app.get("/api/runs/<run_id>")
     def api_run(run_id: str) -> Any:
-        _run_row(run_id)
+        row = _run_row(run_id)
         try:
             artifact_path = resolve_under(
                 out_path, Path(run_id) / "audit.json", must_exist=True
             )
         except (PathSecurityError, OSError) as exc:
             abort(404, description=str(exc))
-        return jsonify(_load_audit(artifact_path))
+        payload = _load_audit(artifact_path)
+        payload["lifecycle"] = row.get("lifecycle")
+        return jsonify(payload)
+
+    @app.get("/api/runs/<run_id>/findings/<finding_key>")
+    def api_finding_history(run_id: str, finding_key: str) -> Any:
+        _run_row(run_id)
+        history = ledger.get_finding_history(ledger_path, run_id, finding_key)
+        if not history:
+            abort(404, description="没有该 finding 的跨运行记录")
+        return jsonify({"finding_key": finding_key, "history": history})
 
     @app.get("/healthz")
     def healthz() -> Any:

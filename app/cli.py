@@ -60,9 +60,12 @@ def _run_pipeline(
     )
     run_dir = output_root / run_id
     ensure_output_path(root, run_dir / "audit.json")
-    write_artifacts(result, run_dir)
     relative = run_dir.relative_to(root).as_posix()
-    ledger.save_run(ledger_target, result, relative)
+    # 先在同一事务内选定基准并写入 finding 与生命周期关系，再让报告读取台账
+    # 认定的状态，保证报告与台账一致（并发审计下以提交顺序为准）。
+    lifecycle = ledger.save_run(ledger_target, result, relative)
+    result["lifecycle"] = lifecycle
+    write_artifacts(result, run_dir)
     return result, run_dir, ledger_target
 
 

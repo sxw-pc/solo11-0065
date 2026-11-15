@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Finding 轨迹 · {{ finding_key }} · 分流验台{% endblock %}
+{% block content %}
+<nav class="breadcrumb">
+  <a href="{{ url_for('index') }}">审计台账</a><span>/</span>
+  <a href="{{ url_for('run_detail', run_id=row.run_id) }}">{{ row.run_id }}</a><span>/</span>
+  <span>{{ finding_key }}</span>
+</nav>
+
+<section class="run-head">
+  <div>
+    <p class="eyebrow">Finding 跨运行轨迹 · {{ row.experiment_id }}</p>
+    <h1>{{ history[0].title if history else finding_key }}</h1>
+    <p class="hero-copy mono-sub">{{ history[0].code if history else "" }} · 业务键 {{ finding_key }}</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <h2>出现记录</h2>
+    <p class="muted">仅列出该业务问题实际产生 finding 的 run；消退的 run 不出现在此处，消退关系在对应 run 详情中标记。比较限定在同 config_digest 之内。</p>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>run</th><th>生成时间</th><th>配置 digest</th><th>严重度</th><th>生命周期</th><th class="num">证据变化</th><th class="num">重现</th><th>证据指纹</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for item in history %}
+        <tr>
+          <td><a class="run-name" href="{{ url_for('run_detail', run_id=item.run_id) }}">{{ item.run_id }}</a></td>
+          <td class="time">{{ item.generated_at.replace("T", " ")[:19] }}</td>
+          <td class="mono-sub">{{ item.config_digest[:12] }}…</td>
+          <td><span class="status {{ item.severity }}">{{ SEVERITY_LABELS.get(item.severity, item.severity) }}</span></td>
+          <td>
+            {% if item.status %}
+            <span class="status {{ 'pass' if item.status == 'resolved' else ('warn' if item.status == 'continuing' else 'fail') }}">{{ LIFECYCLE_LABELS.get(item.status, item.status) }}</span>
+            {% else %}<span class="status neutral">历史无身份</span>{% endif %}
+          </td>
+          <td class="num">{{ "是" if item.evidence_changed else "否" }}</td>
+          <td class="num">{{ "是" if item.reappeared else "否" }}</td>
+          <td class="mono-sub">{{ item.evidence_summary[:12] }}…</td>
+          <td><a href="{{ url_for('artifact', run_id=item.run_id, name='audit.json') }}">JSON</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

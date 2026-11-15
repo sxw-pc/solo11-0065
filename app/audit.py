@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from .checks import (
@@ -22,6 +22,7 @@ from .evaluate import (
     primary_check,
     sample_check,
 )
+from .identity import build_finding_identity
 from .metrics import compute_all_metrics
 from .models import (
     Check,
@@ -47,6 +48,23 @@ def _fragile_finding(primary: Any) -> Finding:
         detail="效应显著，但未同时通过阈值、置信区间和分层一致性检查。",
         evidence=asdict(primary),
     )
+
+
+def _with_stable_identity(findings: list[Finding]) -> list[Finding]:
+    """为每条 finding 填充不依赖 run_id 与文案的稳定业务身份。"""
+    enriched: list[Finding] = []
+    for finding in findings:
+        finding_key, evidence_summary = build_finding_identity(
+            finding.code, finding.category, finding.evidence
+        )
+        enriched.append(
+            replace(
+                finding,
+                finding_key=finding_key,
+                evidence_summary=evidence_summary,
+            )
+        )
+    return enriched
 
 
 def run_audit(
@@ -144,6 +162,7 @@ def run_audit(
 
     decision = decide(config.decision, flags)
     checks.sort(key=check_sort_key)
+    findings = _with_stable_identity(findings)
     findings.sort(key=finding_sort_key)
     severity_counts = Counter(item.severity for item in findings)
     observed_by_variant = {

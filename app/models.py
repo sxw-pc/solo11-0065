@@ -152,6 +152,10 @@ class Finding:
     title: str
     detail: str
     evidence: dict[str, Any] = field(default_factory=dict)
+    # 跨 run 稳定业务身份（由 app.identity 根据 code/category/evidence 业务对象
+    # 派生），默认空串仅为兼容历史构造路径，run_audit 会统一填充。
+    finding_key: str = ""
+    evidence_summary: str = ""
 
 
 @dataclass(frozen=True)

@@ -452,12 +452,32 @@ when:
 
 | 文件 | 内容 |
 | --- | --- |
-| `audit.json` | 完整结构化审计结果：run、实验、counts、flags、checks、findings、metrics、stratification、decision、reproducibility |
-| `decision_card.json` | 精炼决策卡：决策、命中规则、主指标、护栏、检查摘要、输入摘要 |
-| `report.md` | 中文可审阅报告，含决策卡、指标、检查、findings、分层、复现信息 |
+| `audit.json` | 完整结构化审计结果：run、实验、counts、flags、checks、findings（含稳定业务键）、metrics、stratification、decision、lifecycle、reproducibility |
+| `decision_card.json` | 精炼决策卡：决策、命中规则、主指标、护栏、检查摘要、finding 生命周期、输入摘要 |
+| `report.md` | 中文可审阅报告，含决策卡、指标、检查、findings、跨运行生命周期、分层、复现信息 |
 | `report.html` | 自包含 HTML；内联 CSS，不使用外部脚本、字体、图片或 CDN |
 
 `report.html` 生成时会压缩标签间空白，保持单文件紧凑；源模板仍保留可读格式。
+
+### Finding 跨运行生命周期
+
+每条 finding 在审计阶段被赋予两个不依赖 `run_id`、时间戳与易变文案的标识：
+
+- `finding_key`：由 `code`、`category` 与 evidence 中的**业务对象标识**（护栏指标 key、互斥实验 id、分层字段与取值、样本不足的变体等）派生的稳定业务键；计数、p 值、效应量、样本 unit 列表等易变观测不参与。
+- `evidence_summary`：整份 evidence 的观测指纹。同一业务问题证据数值更新时业务键不变、指纹变化，从而区分“持续问题、证据更新”与“不同问题”。
+
+基准选择策略：**沿相同 `config_digest` 找最近的成功 run，跨过配置变化比较**（而不是只比较紧邻成功 run）。比较严格限定在同一 `experiment_id` 与同一配置 digest 之内。每个当前 finding 记录四种状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `new` 新出现 | 同配置历史中没有该业务键 |
+| `continuing` 持续存在 | 同配置历史出现过；`reappeared=true` 表示它在基准 run 短暂消退后再次出现，`cross_config_gap=true` 表示中间跨过配置变化（配置回滚后重现），`evidence_changed=true` 表示证据指纹已更新 |
+| `resolved` 已消退 | 最近同配置基准 run 存在、本次不再产生；记录在它消失的 run 上 |
+| `incomparable` 不可比较 | run 级状态：存在历史 run 但配置 digest 全部不同，本次 finding 按新出现处理且不与配置变化前的问题比较 |
+
+限制：对没有更细业务对象维度的聚合型 code（如 `data.unassigned_observation`），不同输入下的同类问题共享同一 `finding_key`，必须结合 `evidence_summary` 与基准 run 回查判断，不会自动合并为完全相同的观测。
+
+并发审计通过 `BEGIN IMMEDIATE` 写锁串行化基准选择；相同时间戳用 `run_id` 做确定次序；重放旧 run 会在同一事务内重算后继 run 的生命周期关系。
 
 ### SQLite 表
 
@@ -465,13 +485,14 @@ when:
 
 | 表 | 作用 |
 | --- | --- |
-| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、摘要哈希、产物目录 |
+| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、摘要哈希、产物目录、比较基准与比较状态 |
 | `checks` | 检查项、状态、摘要与细节 JSON |
-| `findings` | 结构化问题、严重度、类别、证据 JSON |
+| `findings` | 结构化问题、稳定业务键、证据指纹、严重度、类别、证据 JSON |
+| `finding_lifecycles` | 每个 run 的 finding 生命周期关系：状态、基准/上次/首次 run、证据变化、重现与跨配置标记、前后 finding 摘要 |
 | `metrics` | 主指标、次级指标与护栏的统计结果 |
 | `strata` | 每个分层组的样本量、效应、p 值、可评估与反转标记 |
 
-台账使用参数化 SQL、外键和事务；同一个 run_id 重写会先清理旧子记录，保证幂等。
+台账使用参数化 SQL、外键和事务；同一个 run_id 重写会先清理旧子记录，保证幂等。旧版本数据库（finding 没有稳定身份）在打开时自动增量迁移，历史 run 保持可读并标记 `legacy_no_identity`（无比较基准），其 finding 不会参与后续生命周期判断。
 
 ---
 
@@ -494,11 +515,13 @@ python -m app serve --port 5000
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/` | 台账与决策筛选 |
-| GET | `/runs/<run_id>` | 决策卡、指标、检查、finding、分层与 trace |
+| GET | `/` | 台账与决策筛选（含比较基准列） |
+| GET | `/runs/<run_id>` | 决策卡、指标、检查、finding 生命周期徽章、前后 run 导航、分层与 trace |
+| GET | `/runs/<run_id>/findings/<finding_key>` | 该业务键在同 experiment 内的完整跨运行轨迹与证据指纹 |
 | GET | `/runs/<run_id>/artifacts/<name>` | 允许的四种产物 |
-| GET | `/api/runs` | 台账 JSON 列表 |
-| GET | `/api/runs/<run_id>` | 完整 `audit.json` |
+| GET | `/api/runs` | 台账 JSON 列表（含基准 run 与比较状态） |
+| GET | `/api/runs/<run_id>` | 完整 `audit.json`（含台账权威生命周期段） |
+| GET | `/api/runs/<run_id>/findings/<finding_key>` | finding 跨运行轨迹 JSON |
 | GET | `/healthz` | 本地健康检查 |
 
 ---

@@ -116,6 +116,10 @@ tr:last-child td { border-bottom: 0; }
 .hash-grid dt { color: var(--muted); font-size: 12px; }
 .hash-grid dd { margin: 0; font-size: 11px; }
 .hash { overflow-wrap: anywhere; }
+.run-nav { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 14px 0 4px; flex-wrap: wrap; }
+.finding-life { margin-top: 10px; display: grid; gap: 6px; }
+.life-links { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; }
+.life-links a { white-space: nowrap; }
 @media (max-width: 900px) {
 .hero, .two-col, .decision-panel { grid-template-columns: 1fr; }
 .stat-strip, .stat-strip:has(.stat:nth-child(5)), .stat-strip.compact { grid-template-columns: repeat(2, 1fr); }

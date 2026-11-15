@@ -3,6 +3,25 @@
 {% block content %}
 <nav class="breadcrumb"><a href="{{ url_for('index') }}">审计台账</a><span>/</span><span>{{ row.run_id }}</span></nav>
 
+{% set life = row.lifecycle or {} %}
+{% set life_entries = life.entries or [] %}
+{% set life_map = {} %}
+{% for entry in life_entries %}{% set _ = life_map.update({entry.finding_key: entry}) %}{% endfor %}
+<section class="run-nav">
+  {% if life.baseline_run_id %}
+  <a class="button ghost" href="{{ url_for('run_detail', run_id=life.baseline_run_id) }}">← 比较基准 run</a>
+  {% elif life.comparison_status == "incomparable" %}
+  <span class="status neutral">无同配置基准（配置 digest 已变化）</span>
+  {% elif life.comparison_status == "legacy_no_identity" %}
+  <span class="status neutral">历史 run 无稳定身份，无比较基准</span>
+  {% else %}
+  <span class="status neutral">首次运行，无比较基准</span>
+  {% endif %}
+  {% if row.next_run_id %}
+  <a class="button ghost" href="{{ url_for('run_detail', run_id=row.next_run_id) }}">后继 run →</a>
+  {% endif %}
+</section>
+
 <section class="run-head">
   <div>
     <p class="eyebrow">{{ result.experiment.experiment.id }} · {{ result.experiment.experiment.owner }}</p>
@@ -100,21 +119,55 @@
 <section>
   <div class="section-head">
     <h2>Findings</h2>
-    <p class="muted">按严重度排序的结构化发现。</p>
+    <p class="muted">按严重度排序的结构化发现，含跨运行生命周期与证据回查。</p>
   </div>
   {% if result.findings %}
   <div class="finding-grid">
     {% for finding in result.findings %}
+    {% set entry = life_map.get(finding.finding_key) %}
     <article class="finding-card">
       <div class="finding-top">
         <span class="status {{ finding.severity }}">{{ SEVERITY_LABELS.get(finding.severity, finding.severity) }}</span>
+        {% if entry %}
+        <span class="status {{ 'pass' if entry.status == 'resolved' else ('warn' if entry.status == 'continuing' else 'fail') }}">{{ LIFECYCLE_LABELS.get(entry.status, entry.status) }}{% if entry.cross_config_gap %} · 跨配置重现{% elif entry.reappeared %} · 重现{% elif entry.evidence_changed %} · 证据更新{% endif %}</span>
+        {% endif %}
         <span class="mono-sub">{{ finding.code }}</span>
       </div>
       <h3>{{ finding.title }}</h3>
       <p>{{ finding.detail }}</p>
+      <div class="finding-life">
+        <span class="mono-sub">业务键 {{ finding.finding_key }} · 证据指纹 {{ finding.evidence_summary[:12] }}…</span>
+        {% if entry %}
+        <div class="life-links">
+          {% if entry.previous_run_id %}<a href="{{ url_for('run_detail', run_id=entry.previous_run_id) }}">上一次出现：{{ entry.previous_run_id }}</a>{% endif %}
+          {% if entry.first_seen_run_id and entry.first_seen_run_id != row.run_id %}<a href="{{ url_for('run_detail', run_id=entry.first_seen_run_id) }}">首次出现：{{ entry.first_seen_run_id }}</a>{% endif %}
+          <a href="{{ url_for('finding_history', run_id=row.run_id, finding_key=finding.finding_key) }}">完整轨迹</a>
+        </div>
+        {% endif %}
+      </div>
     </article>
     {% endfor %}
   </div>
+  {% if life.resolved %}
+  <h3 class="field-title">本次消退的 finding</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Finding</th><th>业务键</th><th>状态</th><th>上一次出现</th><th>首次出现</th><th></th></tr></thead>
+      <tbody>
+        {% for entry in life.resolved %}
+        <tr>
+          <td><strong>{{ entry.title }}</strong><div class="mono-sub">{{ entry.code }}</div></td>
+          <td class="mono-sub">{{ entry.finding_key }}</td>
+          <td><span class="status pass">{{ LIFECYCLE_LABELS.resolved }}</span></td>
+          <td><a href="{{ url_for('run_detail', run_id=entry.previous_run_id) }}">{{ entry.previous_run_id }}</a></td>
+          <td><a href="{{ url_for('run_detail', run_id=entry.first_seen_run_id) }}">{{ entry.first_seen_run_id }}</a></td>
+          <td><a href="{{ url_for('finding_history', run_id=row.run_id, finding_key=entry.finding_key) }}">轨迹</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
   {% else %}
   <div class="empty-state slim"><p>未发现需要关注的问题。</p></div>
   {% endif %}
