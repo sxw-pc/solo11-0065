@@ -201,15 +201,32 @@ def welch_t_test(
 ) -> dict[str, float | bool]:
     control_items = list(control_values)
     treatment_items = list(treatment_values)
-    if len(control_items) < 2 or len(treatment_items) < 2:
+    return welch_from_moments(
+        _mean(control_items), _sample_variance(control_items, _mean(control_items)),
+        len(control_items),
+        _mean(treatment_items), _sample_variance(treatment_items, _mean(treatment_items)),
+        len(treatment_items), alpha,
+    )
+
+
+def welch_from_moments(
+    control_mean: float,
+    control_variance: float,
+    control_n: int,
+    treatment_mean: float,
+    treatment_variance: float,
+    treatment_n: int,
+    alpha: float,
+) -> dict[str, float | bool]:
+    """由均值、无偏方差与样本量直接构造 Welch 检验结果。
+
+    CUPED 调整后只需重算均值与方差，无需重新持有逐行样本。
+    """
+    if control_n < 2 or treatment_n < 2:
         raise ValueError("Welch 检验每组至少需要 2 个观测")
-    control_mean = _mean(control_items)
-    treatment_mean = _mean(treatment_items)
     difference = treatment_mean - control_mean
-    control_var = _sample_variance(control_items, control_mean)
-    treatment_var = _sample_variance(treatment_items, treatment_mean)
-    var_c = control_var / len(control_items)
-    var_t = treatment_var / len(treatment_items)
+    var_c = control_variance / control_n
+    var_t = treatment_variance / treatment_n
     standard_error = math.sqrt(var_c + var_t)
     if standard_error == 0.0:
         return {
@@ -221,8 +238,8 @@ def welch_t_test(
             "p_value": 1.0 if difference == 0.0 else 0.0,
             "significant": difference != 0.0,
         }
-    df_denominator = var_c * var_c / (len(control_items) - 1) + (
-        var_t * var_t / (len(treatment_items) - 1)
+    df_denominator = var_c * var_c / (control_n - 1) + (
+        var_t * var_t / (treatment_n - 1)
     )
     degrees = (var_c + var_t) ** 2 / df_denominator if df_denominator else 1.0
     t_value = difference / standard_error
@@ -236,6 +253,99 @@ def welch_t_test(
         "ci_high": difference + critical * standard_error,
         "p_value": p_value,
         "significant": p_value < alpha,
+    }
+
+
+def _centered_covariance(
+    xs: Iterable[float], ys: Iterable[float], x_mean: float, y_mean: float
+) -> float:
+    x_items = list(xs)
+    y_items = list(ys)
+    if len(x_items) != len(y_items) or len(x_items) < 2:
+        return 0.0
+    total = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_items, y_items))
+    return total / (len(x_items) - 1)
+
+
+def cuped_theta(
+    control_x: Iterable[float],
+    control_y: Iterable[float],
+) -> tuple[float | None, float, float]:
+    """只用对照臂估计 CUPED 斜率 theta。
+
+    返回 ``(theta, reference_mean, control_variance)``。
+    对照组协变量方差为零、样本不足两条或均值无法定义时 theta 为 ``None``，
+    调用方必须把调整标记为不可估计，而不是伪报成功。
+    """
+    xs = list(control_x)
+    ys = list(control_y)
+    if len(xs) != len(ys) or len(xs) < 2:
+        return None, 0.0, 0.0
+    x_mean = _mean(xs)
+    y_mean = _mean(ys)
+    variance = _sample_variance(xs, x_mean)
+    if variance <= 0.0:
+        return None, x_mean, 0.0
+    covariance = _centered_covariance(xs, ys, x_mean, y_mean)
+    return covariance / variance, x_mean, variance
+
+
+def cuped_estimate(
+    control_x: Iterable[float],
+    control_y: Iterable[float],
+    treatment_x: Iterable[float],
+    treatment_y: Iterable[float],
+    alpha: float,
+) -> dict[str, object]:
+    """估计 control-only theta 并在同一配对样本上给出调整后 Welch 结果。
+
+    ``Y_adj = Y - theta * (X - reference_mean)``，其中 ``reference_mean``
+    取对照臂实验前协变量均值。theta 只用对照臂的 ``Cov(X, Y) / Var(X)``，
+    处理臂结果不参与斜率估计；两臂只在应用同一 theta 时使用。
+    """
+    control_x_items = list(control_x)
+    control_y_items = list(control_y)
+    treatment_x_items = list(treatment_x)
+    treatment_y_items = list(treatment_y)
+    if len(control_x_items) != len(control_y_items):
+        raise ValueError("对照组 X/Y 长度不一致")
+    if len(treatment_x_items) != len(treatment_y_items):
+        raise ValueError("实验组 X/Y 长度不一致")
+    theta, reference_mean, control_variance = cuped_theta(
+        control_x_items, control_y_items
+    )
+    if theta is None:
+        return {
+            "estimable": False,
+            "theta": None,
+            "theta_source": "control_only",
+            "reference_mean": reference_mean,
+            "control_x_variance": control_variance,
+            "result": None,
+        }
+    control_adjusted = [
+        y - theta * (x - reference_mean)
+        for x, y in zip(control_x_items, control_y_items)
+    ]
+    treatment_adjusted = [
+        y - theta * (x - reference_mean)
+        for x, y in zip(treatment_x_items, treatment_y_items)
+    ]
+    control_mean = _mean(control_adjusted)
+    treatment_mean = _mean(treatment_adjusted)
+    result = welch_from_moments(
+        control_mean, _sample_variance(control_adjusted, control_mean),
+        len(control_adjusted),
+        treatment_mean, _sample_variance(treatment_adjusted, treatment_mean),
+        len(treatment_adjusted), alpha,
+    )
+    return {
+        "estimable": True,
+        "theta": theta,
+        "theta_source": "control_only",
+        "reference_mean": reference_mean,
+        "control_x_variance": control_variance,
+        "result": result,
     }
 
 

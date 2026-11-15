@@ -197,6 +197,49 @@
       {% endfor %}
     </div>
 
+    {% set adjustment = primary.adjustment %}
+    {% if adjustment %}
+    <h2>实验前协变量调整（CUPED）</h2>
+    <p>
+      基线文件 <span class="finding-code">{{ adjustment.baseline_file }}</span>（列
+      <span class="finding-code">{{ adjustment.baseline_column }}</span>）。
+      调整状态
+      <span class="badge {{ 'pass' if adjustment.status == 'adjusted' else 'warn' }}">
+        {{ "已调整" if adjustment.status == "adjusted" else "未估计" }}
+      </span>
+      决策统计 <strong>{{ "调整后 adjusted" if adjustment.decision_statistic == "adjusted" else "原始 raw（全量）" }}</strong>。
+    </p>
+    <p class="finding-code">
+      配对 {{ adjustment.paired_units }}/{{ adjustment.observed_units }} ·
+      覆盖 {{ adjustment.coverage|pct(1) }}（门槛 {{ adjustment.min_coverage|pct(0) }}）·
+      缺失 {{ adjustment.missing_units }} · theta 来源 {{ adjustment.theta_source }} ·
+      theta {{ adjustment.theta|num(6) }} · 参照均值 {{ adjustment.reference_mean|num(4) }}
+    </p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>口径</th><th class="num">对照</th><th class="num">实验</th><th class="num">绝对效应</th><th class="num">95% 区间</th><th class="num">p 值</th><th>显著</th></tr></thead>
+        <tbody>
+          {% for item in [("原始 raw", adjustment.raw), ("调整后 adjusted", adjustment.adjusted)] %}
+          <tr>
+            <td>{{ item[0] }}</td>
+            {% if item[1] %}
+            <td class="num">{{ item[1].control_value|num(4) }}</td>
+            <td class="num">{{ item[1].treatment_value|num(4) }}</td>
+            <td class="num">{{ "%+.4f"|format(item[1].absolute_effect) }}</td>
+            <td class="num">{{ item[1].ci_low|num(3) }} – {{ item[1].ci_high|num(3) }}</td>
+            <td class="num">{{ item[1].p_value|pval }}</td>
+            <td>{{ "是" if item[1].significant else "否" }}</td>
+            {% else %}
+            <td class="num">—</td><td class="num">—</td><td class="num">不可估计</td><td class="num">—</td><td class="num">—</td><td>—</td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="finding-code">原始与调整后的区间 / p 值互为独立口径，不得交叉引用；主指标 finding 与决策仅取决策统计一行。</p>
+    {% endif %}
+
     <h2>Findings</h2>
     {% if result.findings %}
     <div class="findings">

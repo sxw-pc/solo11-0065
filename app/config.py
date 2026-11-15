@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, time, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
-from .models import (DecisionCard, DecisionRule, DecisionSpec, ExperimentConfig,
-                     ExposureSpec, MetricSpec, MutualExclusion, SplitSpec,
-                     StratificationSpec, Variant)
+from .models import (BaselineSpec, DecisionCard, DecisionRule, DecisionSpec,
+                     ExperimentConfig, ExposureSpec, MetricSpec, MutualExclusion,
+                     SplitSpec, StratificationSpec, Variant)
 
 SCHEMA_VERSION = 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
@@ -78,6 +78,29 @@ def _timestamp(value: Any, path: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _baseline(raw: Any, path: str, kind: str, role: str) -> BaselineSpec:
+    """解析实验前协变量声明。只有 kind=mean 的 primary 可以挂 baseline。"""
+    if role != "primary":
+        raise ConfigError(f"{path} 只允许在 metrics.primary 上配置 baseline")
+    if kind != "mean":
+        raise ConfigError(f"{path} 只支持 kind: mean 的主指标")
+    data = _mapping(raw, path)
+    file_name = _text(_required(data, "file", path), f"{path}.file")
+    candidate = PurePosixPath(file_name.replace("\\", "/"))
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or not candidate.parts
+        or any(part in ("", ".") for part in candidate.parts)
+    ):
+        raise ConfigError(f"{path}.file 必须是根目录内的相对路径")
+    column = _text(_required(data, "column", path), f"{path}.column")
+    min_coverage = _number(
+        data.get("min_coverage", 0.9), f"{path}.min_coverage", low=0.001, high=1.0
+    )
+    return BaselineSpec(file=file_name, column=column, min_coverage=min_coverage)
+
+
 def _metric(raw: Any, path: str, role: str) -> MetricSpec:
     data = _mapping(raw, path)
     kind = _text(_required(data, "kind", path), f"{path}.kind")
@@ -95,10 +118,14 @@ def _metric(raw: Any, path: str, role: str) -> MetricSpec:
     metric_key = _text(_required(data, "key", path), f"{path}.key")
     if not METRIC_KEY_RE.match(metric_key):
         raise ConfigError(f"{path}.key 必须是 2-64 位小写字母、数字或下划线")
+    baseline = None
+    if "baseline" in data:
+        baseline = _baseline(data["baseline"], f"{path}.baseline", kind, role)
     return MetricSpec(metric_key,
                       _text(_required(data, "column", path), f"{path}.column"),
                       _text(_required(data, "label", path), f"{path}.label"),
-                      kind, orientation, alpha, min_effect, max_degradation)
+                      kind, orientation, alpha, min_effect, max_degradation,
+                      baseline)
 
 
 def _condition(raw: Any, path: str, depth: int = 0) -> dict[str, Any]:

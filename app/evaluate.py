@@ -38,6 +38,14 @@ def sample_check(
     return check, findings, counts
 
 
+def metric_payload(item: Any) -> dict[str, Any]:
+    """序列化指标结果；未配置 baseline 的旧结果保持原有字段集合。"""
+    payload = asdict(item)
+    if payload.get("adjustment") is None:
+        payload.pop("adjustment", None)
+    return payload
+
+
 def primary_check(
     primary: Any, robust: bool, favorable_share: float
 ) -> tuple[Check, list[Finding]]:
@@ -54,6 +62,10 @@ def primary_check(
         "favorable": primary.favorable, "meets_threshold": primary.meets_threshold,
         "robust": robust, "favorable_share": favorable_share,
     }
+    if primary.adjustment is not None:
+        details["statistic"] = primary.adjustment.decision_statistic
+        details["adjustment_status"] = primary.adjustment.status
+        details["adjustment_reason"] = primary.adjustment.reason
     check = Check(
         "metric.primary", "主指标效应", status,
         f"{primary.label} 效应 {primary.absolute_effect:.4f}，"
@@ -66,7 +78,7 @@ def primary_check(
                 code="metric.negative_significant", severity="high", category="metric",
                 title="主指标出现显著负向效应",
                 detail="实验组主指标方向劣于对照组，且达到统计显著。",
-                evidence=asdict(primary),
+                evidence=metric_payload(primary),
             )
         )
     elif primary.significant and primary.favorable and not primary.meets_threshold:
@@ -75,7 +87,7 @@ def primary_check(
                 code="metric.below_threshold", severity="medium", category="metric",
                 title="主指标效应未达到最小业务阈值",
                 detail="效应方向为正，但绝对提升低于配置中的 min_effect。",
-                evidence=asdict(primary),
+                evidence=metric_payload(primary),
             )
         )
     elif primary.favorable and primary.significant and not robust:
@@ -84,7 +96,42 @@ def primary_check(
                 code="metric.fragile", severity="medium", category="metric",
                 title="主指标效应不够稳健",
                 detail="效应虽显著，但置信区间、阈值或分层一致性未全部通过。",
-                evidence=asdict(primary),
+                evidence=metric_payload(primary),
+            )
+        )
+    return check, findings
+
+
+def baseline_check(primary: Any) -> tuple[Check | None, list[Finding]]:
+    """把 CUPED 口径写入检查矩阵，确保回退时不会被误读为已调整。"""
+    adjustment = getattr(primary, "adjustment", None)
+    if adjustment is None:
+        return None, []
+    adjusted = adjustment.status == "adjusted"
+    status = "pass" if adjusted else "warn"
+    details = asdict(adjustment)
+    decision_stat = adjustment.decision_statistic
+    summary = (
+        f"配对 {adjustment.paired_units}/{adjustment.observed_units} 个观测单元"
+        f"（覆盖 {adjustment.coverage:.1%}，门槛 {adjustment.min_coverage:.0%}）；"
+        f"决策统计 {decision_stat}"
+    )
+    if not adjusted:
+        summary += f"；调整不可估计（{adjustment.reason}）"
+    check = Check("baseline.adjustment", "实验前协变量调整", status, summary, details)
+    findings: list[Finding] = []
+    if not adjusted:
+        findings.append(
+            Finding(
+                code="baseline.not_estimable",
+                severity="medium",
+                category="baseline",
+                title="CUPED 调整不可估计，使用原始全量检验",
+                detail=(
+                    f"实验前协变量未能形成可用配对样本（原因：{adjustment.reason}）。"
+                    "决策统计回退为全量未调整 Welch，结论不代表已做方差校正。"
+                ),
+                evidence=details,
             )
         )
     return check, findings
@@ -117,7 +164,7 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
                     category="guardrail", title=f"护栏指标越界：{item.label}",
                     detail=f"劣化幅度 {item.degradation:.4%} 超过阈值 "
                            f"{item.max_degradation:.4%}。",
-                    evidence=asdict(item),
+                    evidence=metric_payload(item),
                 )
             )
         elif item.guardrail_status == "watch":
@@ -127,7 +174,7 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
                     category="guardrail", title=f"护栏指标接近阈值：{item.label}",
                     detail=f"劣化幅度 {item.degradation:.4%} 已达阈值 "
                            f"{item.max_degradation:.4%} 的一半以上。",
-                    evidence=asdict(item),
+                    evidence=metric_payload(item),
                 )
             )
     return check, findings
@@ -135,9 +182,9 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
 
 def metrics_payload(primary: Any, secondary: list[Any], guardrails: list[Any]) -> dict[str, Any]:
     return {
-        "primary": asdict(primary),
-        "secondary": [asdict(item) for item in secondary],
-        "guardrails": [asdict(item) for item in guardrails],
+        "primary": metric_payload(primary),
+        "secondary": [metric_payload(item) for item in secondary],
+        "guardrails": [metric_payload(item) for item in guardrails],
     }
 
 
@@ -161,6 +208,14 @@ def config_payload(config: ExperimentConfig) -> dict[str, Any]:
             "primary": {
                 "key": config.primary.key, "label": config.primary.label,
                 "min_effect": config.primary.min_effect, "alpha": config.primary.alpha,
+                **(
+                    {"baseline": {
+                        "file": config.primary.baseline.file,
+                        "column": config.primary.baseline.column,
+                        "min_coverage": config.primary.baseline.min_coverage,
+                    }}
+                    if config.primary.baseline is not None else {}
+                ),
             },
             "guardrails": [
                 {"key": item.key, "label": item.label,
@@ -190,7 +245,8 @@ def build_flags(
 ) -> dict[str, bool]:
     guardrail_breach = any(item.guardrail_status == "breach" for item in guardrails)
     guardrail_watch = any(item.guardrail_status == "watch" for item in guardrails)
-    return {
+    adjustment = getattr(primary, "adjustment", None)
+    flags = {
         "split_balanced": split.status == "pass",
         "split_imbalanced": split.status != "pass",
         "duplicate_exposure": exposure.status != "pass",
@@ -217,3 +273,8 @@ def build_flags(
         "guardrail_watch": guardrail_watch,
         "no_guardrail_watch": not guardrail_watch,
     }
+    if adjustment is not None:
+        adjusted = adjustment.status == "adjusted"
+        flags["cuped_adjusted"] = adjusted
+        flags["cuped_fallback_raw"] = not adjusted
+    return flags

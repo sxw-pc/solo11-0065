@@ -35,6 +35,7 @@ def _run_pipeline(
     observations_path: Path,
     out_dir: Path,
     db_path: Path,
+    baseline_path: Path | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     config_target = resolve_under(root, config_path, must_exist=True)
     assignments_target = resolve_under(root, assignments_path, must_exist=True)
@@ -42,11 +43,22 @@ def _run_pipeline(
     output_root = resolve_under(root, out_dir)
     ledger_target = ensure_output_path(root, db_path)
     config = load_config(config_target)
-    dataset = load_dataset(config, assignments_target, observations_target)
-    now = datetime.now(timezone.utc)
-    input_digest = sha256_files(
-        [config_target, assignments_target, observations_target]
+    baseline_target: Path | None = None
+    if config.primary.baseline is not None:
+        declared = Path(config.primary.baseline.file)
+        # 配置内声明的 baseline 相对配置文件所在目录解析；--baseline 则相对项目根。
+        candidate = baseline_path if baseline_path is not None else (
+            config_target.parent / declared
+        )
+        baseline_target = resolve_under(root, candidate, must_exist=True)
+    dataset = load_dataset(
+        config, assignments_target, observations_target, baseline_target
     )
+    now = datetime.now(timezone.utc)
+    digest_inputs = [config_target, assignments_target, observations_target]
+    if baseline_target is not None:
+        digest_inputs.append(baseline_target)
+    input_digest = sha256_files(digest_inputs)
     config_digest = sha256_bytes(config_target.read_bytes())
     run_id = f"run-{now:%Y%m%dT%H%M%S%fZ}-{input_digest[:8]}"
     result = run_audit(
@@ -57,6 +69,7 @@ def _run_pipeline(
         generated_at=now.isoformat(timespec="seconds"),
         input_digest=input_digest,
         config_digest=config_digest,
+        baseline=dataset.baseline,
     )
     run_dir = output_root / run_id
     ensure_output_path(root, run_dir / "audit.json")
@@ -85,6 +98,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         Path(args.observations),
         Path(args.out),
         Path(args.db),
+        Path(args.baseline) if args.baseline else None,
     )
     _print_result(result, run_dir, db_path)
     print("下一步：python -m app serve --port 5000")
@@ -100,6 +114,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         Path(args.observations),
         Path(args.out),
         Path(args.db),
+        Path(args.baseline) if args.baseline else None,
     )
     _print_result(result, run_dir, db_path)
     return 0
@@ -159,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--config", default=DEFAULT_CONFIG)
     demo.add_argument("--assignments", default=DEFAULT_ASSIGNMENTS)
     demo.add_argument("--observations", default=DEFAULT_OBSERVATIONS)
+    demo.add_argument("--baseline", default=None,
+                      help="覆盖配置中 metrics.primary.baseline.file 的路径")
     demo.add_argument("--out", default=DEFAULT_OUT)
     demo.add_argument("--db", default=DEFAULT_DB)
     demo.set_defaults(handler=_cmd_demo)
@@ -167,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--experiment", default=DEFAULT_CONFIG)
     audit.add_argument("--assignments", default=DEFAULT_ASSIGNMENTS)
     audit.add_argument("--observations", default=DEFAULT_OBSERVATIONS)
+    audit.add_argument("--baseline", default=None,
+                       help="覆盖配置中 metrics.primary.baseline.file 的路径")
     audit.add_argument("--out", default=DEFAULT_OUT)
     audit.add_argument("--db", default=DEFAULT_DB)
     audit.set_defaults(handler=_cmd_audit)

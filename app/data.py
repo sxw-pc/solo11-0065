@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .models import Assignment, Dataset, ExperimentConfig, Observation
+from .models import (Assignment, BaselineObservation, Dataset, ExperimentConfig,
+                     Observation)
 
 UNIT_RE = re.compile(r"^unit-\d{4,8}$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
@@ -21,6 +22,10 @@ BASE_ASSIGNMENT_COLUMNS = (
 BASE_OBSERVATION_COLUMNS = (
     "unit_id", "experiment_id", "variant", "observed_at",
 )
+BASE_BASELINE_COLUMNS = (
+    "unit_id", "experiment_id", "metric_key", "measured_at",
+)
+BASELINE_FORBIDDEN_COLUMNS = ("variant", "observed_at")
 
 
 class DataValidationError(ValueError):
@@ -146,13 +151,105 @@ def load_observations(path: Path, config: ExperimentConfig) -> list[Observation]
     return observations
 
 
-def load_dataset(
-    config: ExperimentConfig, assignments_path: Path, observations_path: Path
-) -> Dataset:
-    return Dataset(
-        assignments=load_assignments(assignments_path, config),
-        observations=load_observations(observations_path, config),
+def load_baseline(
+    path: Path,
+    config: ExperimentConfig,
+    *,
+    assignments: list[Assignment] | None = None,
+) -> list[BaselineObservation]:
+    """读取实验前协变量。
+
+    身份权威是 ``(experiment_id, unit_id, metric_key)``：
+    - 文件必须独立声明 ``measured_at``，且不得出现 ``variant`` / ``observed_at`` 列；
+    - ``measured_at`` 必须早于 ``experiment.start``（因此也必然在结果窗口之前）；
+    - 只能关联同一实验、同一指标的已分配 unit，不使用治疗标签做匹配；
+    - 重复键、未分配 unit、越窗与非有限值都会按 ``文件:行`` 拒绝。
+
+    分配但缺少结果的 unit 不在这里报错：它会作为“未配对”进入覆盖统计，
+    由覆盖门槛决定整次调整是否可估计。
+    """
+    spec = config.primary.baseline
+    if spec is None:
+        return []
+    rows = _rows(path, (*BASE_BASELINE_COLUMNS, spec.column))
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            headers = tuple(csv.DictReader(handle).fieldnames or ())
+    except OSError as exc:
+        raise DataValidationError(f"无法读取 {path.name}: {exc}") from exc
+    leaked = [name for name in BASELINE_FORBIDDEN_COLUMNS if name in headers]
+    if leaked:
+        raise DataValidationError(
+            f"{path.name} 不得包含 {', '.join(leaked)}：baseline 只能承载实验前协变量"
+        )
+    experiment_id = config.experiment_id
+    assigned_units = (
+        {row.unit_id for row in assignments if row.experiment_id == experiment_id}
+        if assignments is not None else None
     )
+    baseline: list[BaselineObservation] = []
+    seen: dict[tuple[str, str, str], int] = {}
+    for index, row in enumerate(rows, start=2):
+        unit_id = (row.get("unit_id") or "").strip()
+        row_experiment = (row.get("experiment_id") or "").strip()
+        metric_key = (row.get("metric_key") or "").strip()
+        if not UNIT_RE.match(unit_id):
+            raise DataValidationError(
+                f"{path.name}:{index} unit_id 必须形如 unit-0001"
+            )
+        if not SLUG_RE.match(row_experiment):
+            raise DataValidationError(f"{path.name}:{index} experiment_id 不合法")
+        if row_experiment != experiment_id:
+            raise DataValidationError(
+                f"{path.name}:{index} experiment_id 必须为 {experiment_id}"
+            )
+        if metric_key != config.primary.key:
+            raise DataValidationError(
+                f"{path.name}:{index} metric_key 只能引用主指标 {config.primary.key}"
+            )
+        if assigned_units is not None and unit_id not in assigned_units:
+            raise DataValidationError(
+                f"{path.name}:{index} unit {unit_id} 未分配到本实验"
+            )
+        measured_at = _parse_time(row["measured_at"], path.name, index)
+        if measured_at >= config.start:
+            raise DataValidationError(
+                f"{path.name}:{index} measured_at 必须早于 experiment.start"
+            )
+        value = _metric_value(row[spec.column], "mean", path.name, index, spec.column)
+        key = (row_experiment, unit_id, metric_key)
+        if key in seen:
+            raise DataValidationError(
+                f"{path.name}:{index} 重复键 (experiment_id, unit_id, metric_key)，"
+                f"首次出现在第 {seen[key]} 行"
+            )
+        seen[key] = index
+        baseline.append(
+            BaselineObservation(
+                unit_id=unit_id,
+                experiment_id=row_experiment,
+                metric_key=metric_key,
+                measured_at=measured_at,
+                value=value,
+            )
+        )
+    return baseline
+
+
+def load_dataset(
+    config: ExperimentConfig,
+    assignments_path: Path,
+    observations_path: Path,
+    baseline_path: Path | None = None,
+) -> Dataset:
+    assignments = load_assignments(assignments_path, config)
+    observations = load_observations(observations_path, config)
+    baseline = (
+        load_baseline(baseline_path, config, assignments=assignments)
+        if baseline_path is not None else []
+    )
+    return Dataset(assignments=assignments, observations=observations,
+                   baseline=baseline)
 
 
 def sha256_files(paths: Iterable[Path]) -> str:

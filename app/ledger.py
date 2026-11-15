@@ -86,6 +86,14 @@ CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_strata_run ON strata(run_id);
 """
 
+# 旧台账升级：新增列只在缺失时补齐，不重建表，历史行保持可读。
+RUNS_MIGRATIONS = (
+    ("primary_statistic", "TEXT NOT NULL DEFAULT 'raw'"),
+    ("primary_adjustment_status", "TEXT"),
+    ("primary_theta", "REAL"),
+    ("primary_baseline_coverage", "REAL"),
+)
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -99,9 +107,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _migrate(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+    }
+    for name, definition in RUNS_MIGRATIONS:
+        if name not in columns:
+            connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+
+
 def init_db(db_path: Path) -> None:
     with closing(connect(db_path)) as connection:
         connection.executescript(SCHEMA)
+        _migrate(connection)
         connection.commit()
 
 
@@ -113,6 +131,7 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
     experiment = result["experiment"]["experiment"]
     primary = result["metrics"]["primary"]
     decision = result["decision"]
+    adjustment = primary.get("adjustment")
     init_db(db_path)
     with closing(connect(db_path)) as connection, connection:
         for table in ("checks", "findings", "metrics", "strata", "runs"):
@@ -122,8 +141,10 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
                 run_id, generated_at, experiment_id, experiment_name, decision,
                 decision_title, matched_rule, decision_reason, headline,
                 primary_metric_key, primary_effect, primary_p_value, finding_count,
-                input_digest, config_digest, artifact_dir, decision_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_digest, config_digest, artifact_dir, decision_json,
+                primary_statistic, primary_adjustment_status, primary_theta,
+                primary_baseline_coverage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id, run["generated_at"], experiment["id"], experiment["name"],
                 decision["card"], decision["title"], decision["matched_rule"],
@@ -131,6 +152,10 @@ def save_run(db_path: Path, result: dict[str, Any], artifact_dir: str) -> None:
                 primary["absolute_effect"], primary["p_value"],
                 len(result["findings"]), run["input_digest"], run["config_digest"],
                 artifact_dir, _json(decision),
+                (adjustment or {}).get("decision_statistic", "raw"),
+                (adjustment or {}).get("status"),
+                (adjustment or {}).get("theta"),
+                (adjustment or {}).get("coverage"),
             ),
         )
         connection.executemany(

@@ -32,6 +32,15 @@ class Variant:
 
 
 @dataclass(frozen=True)
+class BaselineSpec:
+    """实验前协变量绑定。仅允许挂在 kind=mean 的 primary 上。"""
+
+    file: str
+    column: str
+    min_coverage: float = 0.9
+
+
+@dataclass(frozen=True)
 class MetricSpec:
     key: str
     column: str
@@ -41,6 +50,7 @@ class MetricSpec:
     alpha: float = 0.05
     min_effect: float = 0.0
     max_degradation: float = 0.0
+    baseline: BaselineSpec | None = None
 
     @property
     def favorable_sign(self) -> int:
@@ -145,6 +155,52 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class BaselineObservation:
+    """实验前协变量。身份只由 (experiment_id, unit_id, metric_key) 决定。"""
+
+    unit_id: str
+    experiment_id: str
+    metric_key: str
+    measured_at: datetime
+    value: float
+
+
+@dataclass(frozen=True)
+class BaselinePair:
+    """配对后的分析样本：(实验前 X, 实验后 Y, 分配臂)。"""
+
+    unit_id: str
+    variant: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class CUPEDAdjustment:
+    """一次主指标 CUPED 调整的完整口径记录。"""
+
+    status: str  # adjusted | not_estimable
+    decision_statistic: str  # adjusted | raw
+    reason: str
+    theta_source: str
+    theta: float | None
+    reference_mean: float | None
+    min_coverage: float
+    coverage: float
+    coverage_by_variant: dict[str, float]
+    coverage_ok: bool
+    assigned_units: int
+    observed_units: int
+    paired_units: int
+    missing_units: int
+    paired_by_variant: dict[str, int]
+    baseline_file: str
+    baseline_column: str
+    raw: dict[str, Any]
+    adjusted: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class Finding:
     code: str
     severity: str
@@ -190,6 +246,7 @@ class MetricResult:
     guardrail_status: str
     degradation: float
     max_degradation: float
+    adjustment: CUPEDAdjustment | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +268,7 @@ class StratumResult:
 class Dataset:
     assignments: list[Assignment]
     observations: list[Observation]
+    baseline: list[BaselineObservation] = field(default_factory=list)
 
     @property
     def primary_assignments(self) -> list[Assignment]:

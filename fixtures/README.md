@@ -7,10 +7,16 @@
 | 文件 | 内容 |
 | --- | --- |
 | `experiment.yaml` | 实验定义、指标、护栏、分层与声明式决策规则 |
+| `experiment_cuped.yaml` | 同一实验的 CUPED 变体：主指标改为均值指标并声明实验前协变量 |
 | `assignments.csv` | 1600 条分配记录，含平台与区域分层字段 |
 | `observations.csv` | 1600 条曝光观测，含激活、会话深度、崩溃字段 |
+| `baseline.csv` | 1600 条实验前协变量记录，与 `session_depth` 强相关 |
 
 生成方式：固定种子 `20260301` 的本地脚本离线生成；脚本不随运行期使用，项目运行时只读取 CSV/YAML。
+
+`baseline.csv` 刻意在生成时剥去了处理组的平均效应，因此协变量只反映实验前水平；
+它与实验后 `session_depth` 的相关系数约为 `0.91`，覆盖 100%。用它做 CUPED 会把主指标
+95% 区间从约 `[0.143, 0.541]` 收窄到约 `[0.270, 0.432]`，是“完全覆盖 + 强相关”的正例。
 
 ## 数据字典
 
@@ -37,6 +43,18 @@
 | `session_depth` | float | 次级指标：会话深度 |
 | `crashed` | 0/1 | 护栏：崩溃 |
 
+### baseline.csv
+
+| 列 | 类型 | 说明 |
+| --- | --- | --- |
+| `unit_id` | string | 与分配一一对应 |
+| `experiment_id` | string | 固定实验 id |
+| `metric_key` | string | 固定为 `session_depth` |
+| `measured_at` | ISO-8601 | 2026-02-15 至 2026-02-27，早于实验开始 |
+| `baseline_session_depth` | float | 实验前会话深度协变量 |
+
+不包含 `variant` 或 `observed_at`：协变量不得携带处理标签或结果窗口信息。
+
 ## 预设信号
 
 数据刻意包含以下信号：
@@ -49,6 +67,8 @@
 6. 没有重复曝光、互斥冲突或结构性数据质量问题。
 
 ## 期望结果
+
+### 基础配置 `experiment.yaml`
 
 运行：
 
@@ -65,6 +85,22 @@ python -m app demo --out out --db data/ledger.sqlite3
   - `stratification.reversal`（high）
   - `guardrail.watch.crash_rate`（medium）
   - `metric.fragile`（medium）
+
+### CUPED 配置 `experiment_cuped.yaml`
+
+运行：
+
+```bash
+python -m app demo --config fixtures/experiment_cuped.yaml \
+  --out out --db data/ledger.sqlite3
+```
+
+- 主指标改为 `session_depth`（mean），并读取 `baseline.csv`。
+- 覆盖 100% ≥ 门槛 90%，theta 由 control 臂估计，状态 `adjusted`。
+- 主指标 finding 与决策使用调整后口径；`raw` 与 `adjusted` 两套 CI 并列展示，互不混用。
+- 强相关协变量收窄了区间，`primary_effect_robust` 由 `false` 变为 `true`；
+  但护栏 `guardrail.watch.crash_rate` 仍存在，因此最终决策仍为 `iterate`
+  （命中 `iterate-evidence` 的 `guardrail_watch`）。
 
 ## 为什么刻意不返回 ship
 

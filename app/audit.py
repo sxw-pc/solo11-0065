@@ -15,9 +15,11 @@ from .checks import (
 from .config import ConfigError
 from .decision import decide, referenced_flags
 from .evaluate import (
+    baseline_check,
     build_flags,
     config_payload,
     guardrail_check,
+    metric_payload,
     metrics_payload,
     primary_check,
     sample_check,
@@ -45,7 +47,7 @@ def _fragile_finding(primary: Any) -> Finding:
         code="metric.fragile", severity="medium", category="metric",
         title="主指标效应不够稳健",
         detail="效应显著，但未同时通过阈值、置信区间和分层一致性检查。",
-        evidence=asdict(primary),
+        evidence=metric_payload(primary),
     )
 
 
@@ -58,6 +60,7 @@ def run_audit(
     generated_at: str,
     input_digest: str,
     config_digest: str,
+    baseline: list[Any] | None = None,
 ) -> dict[str, Any]:
     primary_assignments = [
         row for row in assignments if row.experiment_id == config.experiment_id
@@ -91,10 +94,16 @@ def run_audit(
         + quality_findings + sample_findings
     )
 
-    primary, secondary, guardrails = compute_all_metrics(config, primary_observations)
+    if config.primary.baseline is not None and baseline is None:
+        raise AuditError("主指标声明了实验前协变量，但没有提供 baseline 数据")
+
+    primary, secondary, guardrails, analysis_observations = compute_all_metrics(
+        config, primary_observations, assignments=primary_assignments,
+        baseline=baseline or [],
+    )
     (stratification_fields, stratification_details,
      stratification_check, stratification_findings) = assess_stratification(
-        config, primary_observations, assignments, primary
+        config, analysis_observations, assignments, primary
     )
     checks.append(stratification_check)
     findings.extend(stratification_findings)
@@ -119,6 +128,10 @@ def run_audit(
     )
     checks.append(primary_check_result)
     findings.extend(primary_findings)
+    adjustment_check, adjustment_findings = baseline_check(primary)
+    if adjustment_check is not None:
+        checks.append(adjustment_check)
+        findings.extend(adjustment_findings)
     if primary.favorable and primary.significant and not robust:
         guarded_codes = {
             "stratification.reversal", "metric.fragile",
@@ -163,6 +176,16 @@ def run_audit(
         "mutex_conflict_units": mutex_details["conflict_units"],
         "observation_coverage": quality_details["observation_coverage"],
     }
+    if primary.adjustment is not None:
+        counts["baseline"] = {
+            "baseline_rows": len(baseline or []),
+            "assigned_units": primary.adjustment.assigned_units,
+            "paired_units": primary.adjustment.paired_units,
+            "missing_units": primary.adjustment.missing_units,
+            "coverage": primary.adjustment.coverage,
+            "coverage_by_variant": primary.adjustment.coverage_by_variant,
+            "paired_by_variant": primary.adjustment.paired_by_variant,
+        }
     return {
         "schema_version": 1,
         "run": {
@@ -203,5 +226,9 @@ def run_audit(
             f"{config.name}：{decision['title']}；"
             f"{len(findings)} 条 finding，主指标效应 "
             f"{primary.absolute_effect:+.4f}"
+            + (
+                f"（{primary.adjustment.decision_statistic}）"
+                if primary.adjustment is not None else ""
+            )
         ),
     }

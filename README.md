@@ -231,6 +231,11 @@ metrics:
     orientation: higher_is_better
     min_effect: 0.02
     alpha: 0.05
+    # 仅 kind=mean 的 primary 可选：实验前协变量（CUPED）
+    # baseline:
+    #   file: baseline.csv          # 相对配置文件目录，禁止 ../ 逃逸
+    #   column: baseline_activated
+    #   min_coverage: 0.9
   secondary: []
   guardrails:
     - key: crash_rate
@@ -258,6 +263,8 @@ decision:
 - `split.expected` 必须覆盖全部变体、每项大于 0、总和为 1。
 - `split.tolerance` 在 `[0, 0.5]`，`min_assignments >= 2`。
 - 指标 `kind` 为 `proportion` 或 `mean`；`orientation` 为 `higher_is_better` 或 `lower_is_better`。
+- `baseline` 只能挂在 `kind: mean` 的 `metrics.primary` 上；`file` 必须是根目录内的相对路径，
+  `min_coverage` 在 `(0, 1]`。secondary / guardrail 声明 baseline 会被拒绝。
 - 指标 key 唯一；至少声明一个护栏。
 - 护栏的 `max_degradation` 对比例指标不能大于 1。
 - 分层字段非空且不重复；`max_groups >= 1`。
@@ -299,6 +306,35 @@ decision:
 - 观测缺少对应分配、变体不一致、时间越界会进入审计 finding，而不是被静默忽略。
 - 重复分配与重复曝光由配置 `max_per_unit` / `tolerance` 判定。
 
+### 实验前协变量 CSV（可选）
+
+只有 `metrics.primary` 为 `kind: mean` 且声明了 `baseline` 时才读取。文件独立于观测文件，
+必须显式声明测量时间，且**不允许出现 `variant` 或 `observed_at` 列**，以免把处理标签或结果窗口
+混入协变量。
+
+必需列：
+
+| 列 | 说明 |
+| --- | --- |
+| `unit_id` | 必须能关联到本实验已分配的 unit |
+| `experiment_id` | 必须等于当前实验 id |
+| `metric_key` | 必须是当前主指标 key |
+| `measured_at` | ISO-8601；必须早于 `experiment.start` |
+| 协变量列 | `baseline.column` 指定的列，例如 `baseline_session_depth` |
+
+身份键是 `(experiment_id, unit_id, metric_key)`，**不使用 `variant` 做匹配**，因此不会让处理标签泄漏。
+
+拒绝规则（都会报告 `文件:行`）：
+
+- 重复键；
+- 未分配到本实验的 unit；
+- `experiment_id` 不等于当前实验或 `metric_key` 不等于主指标；
+- `measured_at` 不早于 `experiment.start`；
+- 非有限数值、缺失列、空文件；
+- 出现 `variant` / `observed_at` 列。
+
+分配给实验但没有结果的 unit 不会让读取失败：它会作为“未配对”进入覆盖统计，由覆盖门槛决定是否调整。
+
 ---
 
 ## 审计项与方法
@@ -313,6 +349,7 @@ decision:
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
 | `sample.size` | 每组样本不足 | 每组唯一观测单元少于 `ceil(min_assignments / 2)` |
 | `metric.primary` | 主指标证据 | 负向显著为 fail；稳健通过为 pass；其他为 warn |
+| `baseline.adjustment` | CUPED 口径 | 调整成功为 pass；覆盖不足 / theta 不可估计为 warn，决策统计明确回退 raw |
 | `guardrail.status` | 护栏指标 | 任一越界为 fail；临界为 warn |
 | `stratification.reversal` | 分层稳健性 | 存在显著方向反转或同向分层占比不足 |
 
@@ -334,6 +371,42 @@ decision:
 - **卡方**：拟合优度统计量与上尾概率。
 - 数值函数包含误差函数、Lanczos `lgamma`、正则化不完全 Beta / Gamma 的连分式实现。
 - 所有 p 值夹取到 `[0, 1]`；零方差样本有显式退化处理。
+
+### 实验前协变量调整（CUPED）
+
+仅当 `metrics.primary` 为 `kind: mean` 且声明 `baseline` 时启用；比例主指标、secondary 与
+guardrail 全部保持原有推断路径不变。
+
+**配对身份**：以分配记录为权威，只在同一 `experiment_id` 内按 `(experiment_id, unit_id, metric_key)`
+把实验前协变量 `X` 与实验后结果 `Y` 对齐。`variant` 只用于事后分臂统计，绝不作为匹配键。
+
+**估计口径**（本实现显式选择）：
+
+1. **theta 只用对照臂**：`theta = Cov(X, Y) / Var(X)`，样本限于 control 臂有配对 X/Y 的 unit。
+   处理组结果不参与斜率估计，避免新方案改变 X–Y 关系时把处理效应反馈进调整系数。
+   另一种按臂中心化后用两臂协方差的做法精度更高，但引入共同斜率假设，故不采用。
+2. **覆盖门槛回退**：配对覆盖率 = `配对 unit 数 / 有有效观测的 unit 数`。达到
+   `baseline.min_coverage` 时才在配对样本上调整；低于门槛时把调整标记为 `not_estimable`，
+   **保留全量未调整 Welch 作为实际决策统计**，而不是静默删除 unit 做 complete-case。
+   这样低覆盖时结论仍基于完整随机化总体，但不会伪装成已做方差校正。
+3. **参照均值**取对照臂实验前协变量均值 `reference_mean`，调整值
+   `Y_adj = Y - theta * (X - reference_mean)`。
+
+**输出与不混用**：
+
+- 主指标 `MetricResult` 的效应、方差、CI、p 值、`significant`、`meets_threshold` 全部取自
+  **决策统计**（adjusted 或 raw 二者之一）；robust 与决策规则也基于它。
+- `adjustment.raw` 与 `adjustment.adjusted` 完整保留两套对照均值、效应、区间与 p 值，
+  供核对。原始 CI 与调整后 p 值禁止交叉引用。
+- 覆盖率低于门槛、theta 不可估计（对照组协变量零方差、任一组配对不足 2 条）时：
+  `status = not_estimable`、`decision_statistic = raw`、`adjusted = null`，并产生
+  `baseline.not_estimable` finding 与 `baseline.adjustment`（warn）检查。
+- 结果同时保存：`min_coverage`、`coverage`、`coverage_by_variant`、`paired_units`、
+  `missing_units`、`paired_by_variant`、`theta_source`、`theta`、`reference_mean` 与
+  `decision_statistic`。
+- 分层复核使用与决策统计一致的样本：调整成功时是同一配对样本的调整后 Y；回退时是全量观测。
+
+新增 flags（仅当主指标配置了 baseline 时存在）：`cuped_adjusted` / `cuped_fallback_raw`。
 
 ### 主指标稳健性
 
@@ -441,6 +514,7 @@ when:
 | `stratified_reversal` / `no_stratified_reversal` | 有 / 无显著方向反转 |
 | `guardrail_breach` / `no_guardrail_breach` | 有 / 无护栏越界 |
 | `guardrail_watch` / `no_guardrail_watch` | 有 / 无护栏临界 |
+| `cuped_adjusted` / `cuped_fallback_raw` | 主指标配置了 baseline 时：调整可估计 / 回退到全量未调整 |
 
 ---
 
@@ -465,13 +539,14 @@ when:
 
 | 表 | 作用 |
 | --- | --- |
-| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、摘要哈希、产物目录 |
+| `runs` | 一次运行：实验、决策、命中规则、主指标摘要、决策统计口径（`primary_statistic` / `primary_adjustment_status` / `primary_theta` / `primary_baseline_coverage`）、摘要哈希、产物目录 |
 | `checks` | 检查项、状态、摘要与细节 JSON |
 | `findings` | 结构化问题、严重度、类别、证据 JSON |
 | `metrics` | 主指标、次级指标与护栏的统计结果 |
 | `strata` | 每个分层组的样本量、效应、p 值、可评估与反转标记 |
 
 台账使用参数化 SQL、外键和事务；同一个 run_id 重写会先清理旧子记录，保证幂等。
+旧版本台账在打开时会自动补齐 CUPED 相关列（`primary_statistic` 默认 `raw`），历史行保持可读。
 
 ---
 

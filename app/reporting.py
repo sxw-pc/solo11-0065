@@ -52,7 +52,7 @@ def _environment() -> Environment:
 
 def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
     primary = result["metrics"]["primary"]
-    return {
+    payload = {
         "run_id": result["run"]["run_id"],
         "generated_at": result["run"]["generated_at"],
         "experiment": result["experiment"]["experiment"],
@@ -67,6 +67,53 @@ def decision_card_payload(result: dict[str, Any]) -> dict[str, Any]:
         "findings": result["findings"],
         "input_digest": result["run"]["input_digest"],
     }
+    if primary.get("adjustment") is not None:
+        payload["primary_statistic"] = primary["adjustment"]["decision_statistic"]
+    return payload
+
+
+def _adjustment_lines(primary: dict[str, Any]) -> list[str]:
+    adjustment = primary.get("adjustment")
+    if adjustment is None:
+        return []
+    raw = adjustment["raw"]
+    adjusted = adjustment.get("adjusted")
+    status_label = "已调整" if adjustment["status"] == "adjusted" else "未估计"
+    statistic_label = "调整后" if adjustment["decision_statistic"] == "adjusted" else "原始（全量）"
+    lines = [
+        "",
+        "## 实验前协变量调整（CUPED）",
+        "",
+        f"- 基线文件：`{adjustment['baseline_file']}`（列 `{adjustment['baseline_column']}`）",
+        f"- 调整状态：**{status_label}**（原因：`{adjustment['reason']}`）",
+        f"- 决策统计：**{statistic_label}**；theta 来源：`{adjustment['theta_source']}`",
+        f"- 覆盖：配对 {adjustment['paired_units']}/{adjustment['observed_units']} 个观测单元 "
+        f"（{fmt_pct(adjustment['coverage'])}，门槛 {fmt_pct(adjustment['min_coverage'], 0)}），"
+        f"缺失 {adjustment['missing_units']} 个",
+        f"- 覆盖分臂：{'，'.join(f'{key} {fmt_pct(value, 1)}' for key, value in adjustment['coverage_by_variant'].items())}",
+        f"- theta：{fmt_num(adjustment['theta'], 6)}；参照均值：{fmt_num(adjustment['reference_mean'])}",
+        "",
+        "| 口径 | 对照 | 实验 | 绝对效应 | 95% 区间 | p 值 | 显著 |",
+        "| --- | ---: | ---: | ---: | --- | ---: | --- |",
+    ]
+    for label, payload in (("原始 raw", raw), ("调整后 adjusted", adjusted)):
+        if payload is None:
+            lines.append(f"| {label} | — | — | — | 不可估计 | — | — |")
+            continue
+        lines.append(
+            f"| {label} | {fmt_num(payload['control_value'])} "
+            f"| {fmt_num(payload['treatment_value'])} "
+            f"| {fmt_num(payload['absolute_effect'])} "
+            f"| [{fmt_num(payload['ci_low'])}, {fmt_num(payload['ci_high'])}] "
+            f"| {fmt_p(payload['p_value'])} "
+            f"| {'是' if payload['significant'] else '否'} |"
+        )
+    lines.extend([
+        "",
+        "> 原始与调整后的区间、p 值互为独立口径，不得交叉引用。"
+        "主指标 finding 与决策仅使用上表中的“决策统计”一行。",
+    ])
+    return lines
 
 
 def render_markdown(result: dict[str, Any]) -> str:
@@ -114,6 +161,7 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"| {check['label']} | {CHECK_LABELS.get(check['status'], check['status'])} "
             f"| {check['summary']} |"
         )
+    lines.extend(_adjustment_lines(primary))
     lines.extend(["", "## Findings", ""])
     if not result["findings"]:
         lines.append("未发现需要关注的问题。")

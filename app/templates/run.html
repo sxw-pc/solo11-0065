@@ -80,6 +80,36 @@
         </tbody>
       </table>
     </div>
+    {% set adjustment = result.metrics.primary.adjustment %}
+    {% if adjustment %}
+    <h3 class="field-title">CUPED 口径
+      <span class="mono-sub">
+        配对 {{ adjustment.paired_units }}/{{ adjustment.observed_units }} ·
+        覆盖 {{ adjustment.coverage|pct(1) }} · 门槛 {{ adjustment.min_coverage|pct(0) }} ·
+        theta {{ adjustment.theta|num(6) }}（{{ adjustment.theta_source }}）
+      </span>
+    </h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>口径</th><th class="num">效应</th><th class="num">95% 区间</th><th class="num">p</th><th>决策统计</th></tr></thead>
+        <tbody>
+          {% for label, key, payload in [("原始 raw", "raw", adjustment.raw), ("调整后 adjusted", "adjusted", adjustment.adjusted)] %}
+          <tr>
+            <td>{{ label }}</td>
+            {% if payload %}
+            <td class="num">{{ "%+.4f"|format(payload.absolute_effect) }}</td>
+            <td class="num">{{ payload.ci_low|num(3) }} – {{ payload.ci_high|num(3) }}</td>
+            <td class="num">{{ payload.p_value|pval }}</td>
+            <td>{% if adjustment.decision_statistic == key %}<span class="status pass">采用</span>{% else %}<span class="status neutral">仅核对</span>{% endif %}</td>
+            {% else %}
+            <td class="num">不可估计</td><td class="num">—</td><td class="num">—</td><td><span class="status warn">{{ adjustment.reason }}</span></td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
   </section>
   <section>
     <div class="section-head"><h2>自动检查</h2></div>
