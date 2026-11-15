@@ -1,4 +1,4 @@
-"""仅使用标准库的统计推断：比例 z 检验、Welch t 检验与卡方拟合优度。"""
+"""仅使用标准库的统计推断：比例 z 检验、Welch t 检验、Newcombe-Wilson 差值区间与卡方拟合优度。"""
 
 from __future__ import annotations
 
@@ -178,6 +178,62 @@ def two_proportion_test(
         "p_value": clamp(p_value),
         "significant": bool(clamp(p_value) < alpha),
     }
+
+
+def wilson_score_interval(
+    successes: int, n: int, alpha: float
+) -> tuple[float, float]:
+    """单比例的 Wilson score 区间（置信度 1-alpha），天然落在 [0, 1]。"""
+    if n <= 0:
+        raise ValueError("样本量必须为正")
+    if not 0 <= successes <= n:
+        raise ValueError("成功数必须落在 [0, n] 内")
+    z_critical = normal_ppf(1.0 - alpha / 2.0)
+    z_squared = z_critical * z_critical
+    proportion = successes / n
+    denominator = 1.0 + z_squared / n
+    center = (proportion + z_squared / (2.0 * n)) / denominator
+    half_width = (
+        z_critical
+        * math.sqrt(
+            proportion * (1.0 - proportion) / n + z_squared / (4.0 * n * n)
+        )
+        / denominator
+    )
+    # x=0 时下界、x=n 时上界在数学上恰为 0/1，直接给出精确边界。
+    low = 0.0 if successes == 0 else clamp(center - half_width)
+    high = 1.0 if successes == n else clamp(center + half_width)
+    return low, high
+
+
+def newcombe_wilson_interval(
+    control_successes: int,
+    control_n: int,
+    treatment_successes: int,
+    treatment_n: int,
+    alpha: float,
+) -> tuple[float, float]:
+    """Newcombe-Wilson（方法 10）两比例差值区间，效应方向为 treatment - control。
+
+    由两臂各自的 Wilson score 区间组合而成：近边界与小样本下覆盖率稳定，
+    且区间天然落在 [-1, 1]，不需要事后把结果夹紧到可行范围。
+    """
+    control_low, control_high = wilson_score_interval(
+        control_successes, control_n, alpha
+    )
+    treatment_low, treatment_high = wilson_score_interval(
+        treatment_successes, treatment_n, alpha
+    )
+    control = control_successes / control_n
+    treatment = treatment_successes / treatment_n
+    difference = treatment - control
+    low = difference - math.sqrt(
+        (treatment - treatment_low) ** 2 + (control_high - control) ** 2
+    )
+    high = difference + math.sqrt(
+        (treatment_high - treatment) ** 2 + (control - control_low) ** 2
+    )
+    return low, high
 
 
 def _mean(values: Iterable[float]) -> float:

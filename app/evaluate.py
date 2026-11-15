@@ -6,6 +6,7 @@ import math
 from dataclasses import asdict
 from typing import Any
 
+from .metrics import degradation_interval
 from .models import Check, ExperimentConfig, Finding, Observation
 
 
@@ -94,29 +95,39 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
     breaches = [item for item in guardrails if item.guardrail_status == "breach"]
     watches = [item for item in guardrails if item.guardrail_status == "watch"]
     status = "fail" if breaches else ("warn" if watches else "pass")
-    details = {
-        "metrics": [
+    metric_details = []
+    for item in guardrails:
+        degradation_ci = degradation_interval(
+            item.orientation, item.ci_low, item.ci_high
+        )
+        metric_details.append(
             {"key": item.key, "label": item.label, "status": item.guardrail_status,
              "degradation": item.degradation,
+             "degradation_ci": [degradation_ci[0], degradation_ci[1]],
              "max_degradation": item.max_degradation, "p_value": item.p_value}
-            for item in guardrails
-        ],
+        )
+    details = {
+        "metrics": metric_details,
         "breaches": [item.key for item in breaches],
         "watches": [item.key for item in watches],
     }
     check = Check(
         "guardrail.status", "护栏指标", status,
-        f"护栏越界 {len(breaches)} 项，临界 {len(watches)} 项", details,
+        f"护栏越界 {len(breaches)} 项，证据不足 {len(watches)} 项", details,
     )
     findings: list[Finding] = []
     for item in guardrails:
+        degradation_ci = degradation_interval(
+            item.orientation, item.ci_low, item.ci_high
+        )
         if item.guardrail_status == "breach":
             findings.append(
                 Finding(
                     code=f"guardrail.breach.{item.key}", severity="critical",
                     category="guardrail", title=f"护栏指标越界：{item.label}",
-                    detail=f"劣化幅度 {item.degradation:.4%} 超过阈值 "
-                           f"{item.max_degradation:.4%}。",
+                    detail=f"劣化置信下界 {degradation_ci[0]:.4%} 已高于阈值 "
+                           f"{item.max_degradation:.4%}（点估计 "
+                           f"{item.degradation:.4%}），越界证据充分。",
                     evidence=asdict(item),
                 )
             )
@@ -124,9 +135,11 @@ def guardrail_check(guardrails: list[Any]) -> tuple[Check, list[Finding]]:
             findings.append(
                 Finding(
                     code=f"guardrail.watch.{item.key}", severity="medium",
-                    category="guardrail", title=f"护栏指标接近阈值：{item.label}",
-                    detail=f"劣化幅度 {item.degradation:.4%} 已达阈值 "
-                           f"{item.max_degradation:.4%} 的一半以上。",
+                    category="guardrail", title=f"护栏指标证据不足：{item.label}",
+                    detail=f"劣化点估计 {item.degradation:.4%}，劣化区间 "
+                           f"[{degradation_ci[0]:.4%}, {degradation_ci[1]:.4%}] "
+                           f"跨过阈值 {item.max_degradation:.4%}，"
+                           "无法确认安全或越界。",
                     evidence=asdict(item),
                 )
             )

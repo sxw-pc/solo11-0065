@@ -1,4 +1,11 @@
-"""审计编排：检查 -> 指标 -> 分层 -> flags -> 声明式决策。"""
+"""审计编排：检查 -> 指标 -> 分层 -> flags -> 声明式决策。
+
+护栏指标在这里按三态证据契约流转：compute_all_metrics 基于劣化置信区间
+（比例指标使用 Newcombe-Wilson 差值区间，均值指标使用 Welch 区间）给出
+breach/watch/ok；guardrail_check 把 breach 转成 fail+critical finding、
+watch 转成 warn+medium finding；build_flags 再映射为 guardrail_breach /
+guardrail_watch 决策 flag。
+"""
 
 from __future__ import annotations
 

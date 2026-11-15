@@ -313,7 +313,7 @@ decision:
 | `data.quality` | 数据一致性 | 未分配观测、变体不一致、时间越界；覆盖率低为告警 |
 | `sample.size` | 每组样本不足 | 每组唯一观测单元少于 `ceil(min_assignments / 2)` |
 | `metric.primary` | 主指标证据 | 负向显著为 fail；稳健通过为 pass；其他为 warn |
-| `guardrail.status` | 护栏指标 | 任一越界为 fail；临界为 warn |
+| `guardrail.status` | 护栏指标 | 任一证实越界为 fail；存在证据不足为 warn |
 | `stratification.reversal` | 分层稳健性 | 存在显著方向反转或同向分层占比不足 |
 
 检查状态只有 `pass / warn / fail`，按 `fail → warn → pass` 排序展示。
@@ -356,9 +356,13 @@ higher_is_better: degradation = control - treatment
 lower_is_better:  degradation = treatment - control
 ```
 
-- `degradation > max_degradation` → `breach`
-- `degradation > 0.5 * max_degradation` 且未越界 → `watch`
-- 其他 → `ok`
+劣化点估计保持上述定义，判级则基于劣化置信区间的三态证据契约
+（比例指标使用 Newcombe-Wilson 差值区间，均值指标使用 Welch 区间，
+区间按 `alpha` 对应置信度构造，并按方向翻转）：
+
+- 劣化区间下界 `> max_degradation` → `breach`（越界已证实）
+- 劣化区间上界 `< max_degradation` → `ok`（安全已证实）
+- 区间跨过阈值（含小样本宽区间）→ `watch`（证据不足）
 
 `breach` 是阻断项；`watch` 进入 finding 并影响保守决策。
 
